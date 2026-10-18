@@ -8,6 +8,36 @@ from apps.inventory.models import InventoryBalance
 from apps.catalog.models import ProductVariant
 
 def calculate_store_overview_metrics(store, days=30):
+    if not store:
+        from apps.tenancy.models import Store
+        store = Store.objects.filter(is_active=True).first()
+
+    if not store:
+        return {
+            'currency': 'IRR',
+            'period_days': days,
+            'gross_sales': 0,
+            'discounts': 0,
+            'net_sales': 0,
+            'shipping_collected': 0,
+            'paid_revenue': 0,
+            'outstanding_amount': 0,
+            'order_count': 0,
+            'cancelled_orders_count': 0,
+            'average_order_value': 0,
+            'gross_profit': 0,
+            'refunds_amount': 0,
+            'net_operating_profit': 0,
+            'gross_profit_margin_pct': 0,
+            'inventory_valuation': 0,
+            'inventory_units_on_hand': 0,
+            'low_stock_count': 0,
+            'out_of_stock_count': 0,
+            'channels': [],
+            'daily_sales': [],
+            'top_products': [],
+        }
+
     start_date = timezone.now() - timedelta(days=days)
 
     active_orders = Order.objects.filter(

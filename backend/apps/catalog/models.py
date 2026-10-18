@@ -13,6 +13,7 @@ class Category(TenantScopedModel):
         verbose_name = 'دسته‌بندی'
         verbose_name_plural = 'دسته‌بندی‌ها'
         unique_together = ('store', 'slug')
+        ordering = ['name']
 
     def __str__(self):
         return self.name

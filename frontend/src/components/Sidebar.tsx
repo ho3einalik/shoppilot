@@ -64,110 +64,114 @@ export function Sidebar() {
   return (
     <aside
       className={cn(
-        'relative z-20 flex flex-col justify-between transition-all duration-300 select-none py-5 px-3 my-4 mr-4',
+        'sticky top-[5rem] z-20 self-start flex flex-col transition-all duration-300 select-none py-2.5 px-2 h-fit',
         'bg-[#0b101d]/90 dark:bg-[#0b101d]/90 light:bg-white/95 backdrop-blur-2xl border border-white/[0.08] dark:border-white/[0.08] light:border-slate-200 rounded-3xl shadow-[0_10px_40px_rgba(0,0,0,0.4)]',
-        expanded ? 'w-64' : 'w-[72px]'
+        expanded ? 'w-60' : 'w-[68px]'
       )}
     >
-      {/* Top Section / Nav Items */}
-      <div className="flex flex-col items-center gap-6 w-full">
-        {/* Toggle Expand / Collapse button */}
+      {/* Top Toggle Button */}
+      <div className="flex items-center justify-center w-full mb-1">
         <button
           onClick={() => setExpanded(!expanded)}
           title={expanded ? 'کوچک کردن منو' : 'باز کردن منو'}
-          className="w-10 h-10 rounded-2xl bg-white/[0.04] dark:bg-white/[0.04] light:bg-slate-100 hover:bg-white/[0.08] border border-white/[0.06] text-slate-400 hover:text-white dark:hover:text-white light:hover:text-slate-900 flex items-center justify-center transition-all"
+          className="w-8 h-8 rounded-xl bg-white/[0.04] dark:bg-white/[0.04] light:bg-slate-100 hover:bg-white/[0.08] border border-white/[0.06] text-slate-400 hover:text-white dark:hover:text-white light:hover:text-slate-900 flex items-center justify-center transition-all cursor-pointer"
         >
-          {expanded ? <ChevronRight className="w-4 h-4" /> : <ChevronLeft className="w-4 h-4" />}
+          {expanded ? <ChevronRight className="w-3.5 h-3.5" /> : <ChevronLeft className="w-3.5 h-3.5" />}
         </button>
-
-        {/* Navigation Icons Column */}
-        <nav className="flex flex-col items-center gap-3 w-full">
-          {mainNavItems.map((item) => {
-            const Icon = item.icon;
-            const isActive = pathname === item.href || (item.href !== '/' && pathname.startsWith(item.href));
-
-            return (
-              <Link
-                key={item.href}
-                href={item.href}
-                title={item.label}
-                className={cn(
-                  'group relative flex items-center transition-all duration-200 rounded-2xl',
-                  expanded
-                    ? 'w-full px-3.5 py-3 gap-3.5 justify-start'
-                    : 'w-12 h-12 justify-center',
-                  isActive
-                    ? 'bg-blue-600 text-white shadow-[0_0_22px_rgba(37,99,235,0.65)] border border-blue-400/40'
-                    : 'text-slate-400 hover:text-slate-100 dark:hover:text-slate-100 light:hover:text-slate-900 hover:bg-white/[0.06] light:hover:bg-slate-100'
-                )}
-              >
-                <Icon
-                  className={cn(
-                    'w-5 h-5 shrink-0 transition-transform duration-200 group-hover:scale-110',
-                    isActive ? 'text-white' : 'text-slate-400 group-hover:text-slate-200 light:group-hover:text-slate-800'
-                  )}
-                />
-
-                {expanded && (
-                  <span
-                    className={cn(
-                      'text-xs font-medium whitespace-nowrap overflow-hidden transition-all',
-                      isActive ? 'text-white font-semibold' : 'text-slate-300 light:text-slate-700'
-                    )}
-                  >
-                    {item.label}
-                  </span>
-                )}
-
-                {/* Floating tooltip when collapsed */}
-                {!expanded && (
-                  <div className="absolute right-full mr-3.5 px-3 py-1.5 bg-[#0e1628] text-slate-200 text-xs font-medium rounded-xl shadow-xl border border-white/10 opacity-0 pointer-events-none group-hover:opacity-100 transition-opacity duration-150 whitespace-nowrap z-50">
-                    {item.label}
-                  </div>
-                )}
-              </Link>
-            );
-          })}
-        </nav>
       </div>
 
-      {/* Bottom Section (Theme Toggle + User Pill) */}
-      <div className="flex flex-col items-center gap-4 w-full pt-4 border-t border-white/[0.06] light:border-slate-200">
+      {/* Navigation Icons Column (No scrollbar) */}
+      <nav className="flex flex-col items-center gap-1 w-full py-0.5">
+        {mainNavItems.map((item) => {
+          const Icon = item.icon;
+          const isActive = pathname === item.href || (item.href !== '/' && pathname.startsWith(item.href));
+
+          return (
+            <Link
+              key={item.href}
+              href={item.href}
+              title={item.label}
+              className={cn(
+                'group relative flex items-center transition-all duration-200 rounded-xl',
+                expanded
+                  ? 'w-full px-2.5 py-1.5 gap-2.5 justify-start'
+                  : 'w-9 h-9 justify-center',
+                isActive
+                  ? 'bg-blue-600 text-white shadow-[0_0_16px_rgba(37,99,235,0.6)] border border-blue-400/40'
+                  : 'text-slate-400 hover:text-slate-100 dark:hover:text-slate-100 light:hover:text-slate-900 hover:bg-white/[0.06] light:hover:bg-slate-100'
+              )}
+            >
+              <Icon
+                className={cn(
+                  'w-4 h-4 shrink-0 transition-transform duration-200 group-hover:scale-110',
+                  isActive ? 'text-white' : 'text-slate-400 group-hover:text-slate-200 light:group-hover:text-slate-800'
+                )}
+              />
+
+              {expanded && (
+                <span
+                  className={cn(
+                    'text-[11px] font-medium whitespace-nowrap overflow-hidden transition-all',
+                    isActive ? 'text-white font-semibold' : 'text-slate-300 light:text-slate-700'
+                  )}
+                >
+                  {item.label}
+                </span>
+              )}
+
+              {/* Floating tooltip when collapsed */}
+              {!expanded && (
+                <div className="absolute right-full mr-2.5 px-2.5 py-1 bg-[#0e1628] text-slate-200 text-[11px] font-medium rounded-lg shadow-xl border border-white/10 opacity-0 pointer-events-none group-hover:opacity-100 transition-opacity duration-150 whitespace-nowrap z-50">
+                  {item.label}
+                </div>
+              )}
+            </Link>
+          );
+        })}
+      </nav>
+
+      {/* Bottom Section (Theme Toggle + User Pill) - Directly below nav items */}
+      <div className="flex flex-col items-center gap-1.5 w-full pt-2 mt-1.5 border-t border-white/[0.06] light:border-slate-200">
         {/* Working Theme mode button */}
         <button
           onClick={toggleTheme}
           title={theme === 'dark' ? 'تغییر به حالت روشن' : 'تغییر به حالت تاریک'}
-          className="flex flex-col items-center justify-center gap-1 text-slate-400 hover:text-white light:hover:text-slate-900 transition-colors group cursor-pointer"
+          className={cn(
+            'flex items-center text-slate-400 hover:text-white light:hover:text-slate-900 transition-colors group cursor-pointer rounded-xl hover:bg-white/[0.04]',
+            expanded ? 'w-full px-2.5 py-1.5 gap-2.5 justify-start' : 'w-8 h-8 justify-center'
+          )}
         >
-          <div className="w-10 h-10 rounded-2xl bg-white/[0.04] dark:bg-white/[0.04] light:bg-slate-100 hover:bg-white/[0.08] light:hover:bg-slate-200 flex items-center justify-center transition-all group-hover:shadow-[0_0_12px_rgba(255,255,255,0.2)]">
+          <div className="w-7 h-7 rounded-lg bg-white/[0.04] dark:bg-white/[0.04] light:bg-slate-100 hover:bg-white/[0.08] light:hover:bg-slate-200 flex items-center justify-center transition-all group-hover:shadow-[0_0_10px_rgba(255,255,255,0.2)]">
             {theme === 'dark' ? (
-              <Sun className="w-4 h-4 text-amber-400" />
+              <Sun className="w-3.5 h-3.5 text-amber-400" />
             ) : (
-              <Moon className="w-4 h-4 text-sky-500" />
+              <Moon className="w-3.5 h-3.5 text-sky-500" />
             )}
           </div>
-          <span className="text-[10px] text-slate-400 font-medium">
-            {theme === 'dark' ? 'Light' : 'Dark'}
-          </span>
+          {expanded && (
+            <span className="text-[11px] text-slate-300 light:text-slate-700 font-medium">
+              {theme === 'dark' ? 'حالت روشن' : 'حالت تاریک'}
+            </span>
+          )}
         </button>
 
-        {/* User Pill matching reference image */}
+        {/* User Pill */}
         <div
           className={cn(
-            'flex items-center gap-2 rounded-2xl bg-white/[0.04] dark:bg-white/[0.04] light:bg-slate-100 border border-white/[0.06] light:border-slate-200 p-1.5 transition-all w-full cursor-pointer hover:bg-white/[0.08] light:hover:bg-slate-200',
-            expanded ? 'justify-start px-2.5' : 'justify-center'
+            'flex items-center gap-2 rounded-xl bg-white/[0.04] dark:bg-white/[0.04] light:bg-slate-100 border border-white/[0.06] light:border-slate-200 p-1 transition-all w-full cursor-pointer hover:bg-white/[0.08] light:hover:bg-slate-200',
+            expanded ? 'justify-start px-2' : 'justify-center'
           )}
           title={user?.full_name || 'حساب کاربری'}
         >
-          <div className="w-7 h-7 rounded-full bg-gradient-to-tr from-blue-600 to-cyan-400 flex items-center justify-center text-[11px] font-bold text-white shadow-inner shrink-0">
+          <div className="w-7 h-7 rounded-full bg-gradient-to-tr from-blue-600 to-cyan-400 flex items-center justify-center text-[10px] font-bold text-white shadow-inner shrink-0">
             {user?.full_name ? user.full_name.charAt(0) : 'U'}
           </div>
           {expanded && (
             <div className="overflow-hidden flex-1">
-              <div className="text-xs font-semibold text-slate-200 light:text-slate-800 truncate">
+              <div className="text-[11px] font-semibold text-slate-200 light:text-slate-800 truncate">
                 {user?.full_name || 'کاربر شاپ‌پایلوت'}
               </div>
-              <div className="text-[10px] text-slate-500 truncate">
+              <div className="text-[9px] text-slate-500 truncate">
                 {user?.phone_number || 'آنلاین'}
               </div>
             </div>
@@ -175,5 +179,6 @@ export function Sidebar() {
         </div>
       </div>
     </aside>
+
   );
 }

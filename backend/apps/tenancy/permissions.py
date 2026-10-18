@@ -129,9 +129,9 @@ class IsStoreMemberPermission(permissions.BasePermission):
     def has_permission(self, request, view):
         if not (request.user and request.user.is_authenticated):
             return False
+        store = get_request_store(request)
         if request.user.is_superuser or request.user.is_staff:
             return True
-        store = get_request_store(request)
         membership = getattr(request, 'membership', None)
         if not (store and membership):
             return False
@@ -149,9 +149,9 @@ class IsStoreAdminOrOwnerPermission(permissions.BasePermission):
     def has_permission(self, request, view):
         if not (request.user and request.user.is_authenticated):
             return False
+        store = get_request_store(request)
         if request.user.is_superuser or request.user.is_staff:
             return True
-        store = get_request_store(request)
         membership = getattr(request, 'membership', None)
         if not (store and membership):
             return False
