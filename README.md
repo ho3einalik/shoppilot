@@ -2,10 +2,13 @@
 
 ShopPilot is a production-oriented, modular, multi-tenant SaaS platform engineered for managing and optimizing multi-channel online and social commerce businesses (Instagram, Telegram, WooCommerce, physical stores).
 
+> 📖 **مستند کامل قابلیت‌ها و امکانات:** برای مطالعه فهرست کامل و جزییات تمامی ماژول‌ها و امکانات اضافه شده، فایل [FEATURES.md](./FEATURES.md) را مشاهده فرمایید.
+
 ---
 
 ## Key Modules & Capabilities
 
+- **External Integrations Center (مرکز اتصال‌ها):** Centralized, encrypted management of SMS (Kavenegar), Instagram Meta Graph API, Zarinpal payment gateway, Iran Post/Tipax shipping, Gemini AI, and SMTP email with server-side live testing and SSRF protection.
 - **Multi-Tenancy & RBAC:** Multi-business, multi-store architecture with strict data isolation, role-based access control, and audit logs.
 - **Product Catalog:** Products, variants (SKU/barcodes), categories, cost & retail price tracking in Iranian Toman (IRT) and Rial (IRR).
 - **Inventory & Warehouses:** Concurrency-safe stock management, multi-warehouse support, atomic reservations, double-entry inventory ledger.
