@@ -1,7 +1,7 @@
 import uuid
 from django.db import models
 from django.conf import settings
-from apps.tenancy.models import Store
+from apps.tenancy.models import Store, TenantScopedModel
 
 
 class SubscriptionTier(models.TextChoices):
@@ -12,18 +12,59 @@ class SubscriptionTier(models.TextChoices):
 
 
 class IntegrationState(models.TextChoices):
+    # Core precise lifecycle states
+    NOT_CONFIGURED = 'NOT_CONFIGURED', 'هنوز تنظیم نشده'
+    CONFIGURED = 'CONFIGURED', 'اطلاعات ذخیره شده، اما اتصال تست نشده'
+    TESTING = 'TESTING', 'تست در حال اجرا'
+    TEST_FAILED = 'TEST_FAILED', 'تست ناموفق'
+    READY = 'READY', 'تست موفق و آماده فعال‌سازی'
+    ACTIVE = 'ACTIVE', 'فعال و عملیاتی'
+    DISABLED = 'DISABLED', 'غیرفعال'
+    REAUTH_REQUIRED = 'REAUTH_REQUIRED', 'نیازمند احراز هویت مجدد'
+    ERROR = 'ERROR', 'خطای عملیاتی'
+
+    # Compatibility states with existing modules & tests
     CONNECTED = 'CONNECTED', 'متصل و آماده به کار'
-    CONFIGURED = 'CONFIGURED', 'پیکربندی شده'
     CONNECTION_TESTED = 'CONNECTION_TESTED', 'اتصال با موفقیت تست شده'
-    NOT_CONFIGURED = 'NOT_CONFIGURED', 'پیکربندی‌نشده'
     DISABLED_BY_STORE = 'DISABLED_BY_STORE', 'غیرفعال توسط فروشگاه'
     PLAN_RESTRICTED = 'PLAN_RESTRICTED', 'نیازمند ارتقای اشتراک'
     UNAVAILABLE = 'UNAVAILABLE', 'موقتاً در دسترس نیست'
     NEEDS_REAUTH = 'NEEDS_REAUTH', 'نیازمند اتصال مجدد / انقضای توکن'
     FAILED_RECOVERY = 'FAILED_RECOVERY', 'خطای ارتباط - در انتظار بازیابی'
-    ERROR = 'ERROR', 'خطای ارتباط با سرویس'
     MOCKED = 'MOCKED', 'شبیه‌سازی / حالت تستی'
     MANUAL_ONLY = 'MANUAL_ONLY', 'فقط حالت دستی'
+
+
+class StoreIntegrationConfig(TenantScopedModel):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    integration_id = models.CharField(max_length=60, db_index=True, verbose_name="شناسه یکتای اتصال")
+    status = models.CharField(
+        max_length=40,
+        choices=IntegrationState.choices,
+        default=IntegrationState.NOT_CONFIGURED,
+        verbose_name="وضعیت اتصال"
+    )
+    config_data = models.JSONField(
+        default=dict,
+        blank=True,
+        verbose_name="تنظیمات رمزنگاری‌شده اتصال"
+    )
+    is_active = models.BooleanField(default=False, verbose_name="فعال بودن اتصال")
+    last_tested_at = models.DateTimeField(null=True, blank=True, verbose_name="زمان آخرین تست")
+    last_test_success = models.BooleanField(null=True, blank=True, verbose_name="نتیجه آخرین تست")
+    last_test_result = models.JSONField(default=dict, blank=True, verbose_name="جزئیات نتیجه آخرین تست")
+    last_test_error = models.TextField(blank=True, verbose_name="پیام خطای آخرین تست")
+    last_connected_at = models.DateTimeField(null=True, blank=True, verbose_name="زمان آخرین اتصال موفق")
+
+    class Meta:
+        verbose_name = "تنظیمات اتصال خارجی فروشگاه"
+        verbose_name_plural = "تنظیمات اتصالات خارجی فروشگاه‌ها"
+        unique_together = ('store', 'integration_id')
+        ordering = ['integration_id']
+
+    def __str__(self):
+        return f"{self.integration_id} - {self.store.name} ({self.status})"
+
 
 
 class StoreFeatureSetting(models.Model):

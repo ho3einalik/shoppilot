@@ -458,6 +458,13 @@ export default function FeaturesSettingsPage() {
               در صورت قطعی یا عدم اتصال هر سرویس، سیستم به صورت خودکار به وضعیت تاب‌آور (Graceful Fallback) تغییر وضعیت می‌دهد.
             </p>
           </div>
+          <a
+            href="/settings/integrations"
+            className="flex items-center gap-1.5 px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-xs font-bold text-white transition-colors shadow-sm shadow-blue-950 shrink-0"
+          >
+            <span>مدیریت کامل اتصال‌ها و کلیدها</span>
+            <ExternalLink className="w-3.5 h-3.5" />
+          </a>
         </div>
 
         <div className="grid grid-cols-1 md:grid-cols-3 gap-5">

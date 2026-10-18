@@ -4,6 +4,7 @@ from rest_framework import permissions, status
 from rest_framework.exceptions import PermissionDenied, ValidationError
 
 from apps.tenancy.permissions import IsStoreMemberPermission, IsStoreAdminOrOwnerPermission, get_request_store
+from .models import StoreIntegrationConfig, IntegrationState
 from .services import FeatureService
 from .adapters import IntegrationRegistry
 from .serializers import (
@@ -342,8 +343,214 @@ class IntegrationListView(APIView):
 
     def get(self, request):
         store = get_request_store(request)
+        is_canonical = request.query_params.get('canonical', '').lower() in ('true', '1')
+
+        if is_canonical:
+            adapters = IntegrationRegistry.get_canonical_adapters()
+            results = []
+            for adapter in adapters:
+                record = adapter.get_store_config_record(store)
+                status_val = adapter.get_status(store)
+                health = adapter.health_check(store)
+                results.append({
+                    'id': adapter.name,
+                    'name': adapter.name,
+                    'category': adapter.category,
+                    'display_name_fa': adapter.display_name_fa,
+                    'description_fa': adapter.description_fa,
+                    'guide_fa': adapter.guide_fa,
+                    'status': status_val,
+                    'is_active': record.is_active if record else (status_val in (IntegrationState.ACTIVE, IntegrationState.CONNECTED)),
+                    'is_ready': adapter.is_ready(store),
+                    'message': health.message,
+                    'last_tested_at': record.last_tested_at.isoformat() if (record and record.last_tested_at) else None,
+                    'last_connected_at': record.last_connected_at.isoformat() if (record and record.last_connected_at) else None,
+                    'last_test_error': record.last_test_error if record else "",
+                    'last_test_success': record.last_test_success if record else None,
+                    'schema': adapter.get_schema(),
+                    'config': adapter.get_config(store, decrypted=False)
+                })
+            return Response(results)
+
+        # Standard dictionary format for backward compatibility
         integrations = IntegrationRegistry.get_store_integration_statuses(store)
         return Response(integrations)
+
+
+class IntegrationDetailView(APIView):
+    permission_classes = [permissions.IsAuthenticated, IsStoreMemberPermission]
+
+    def get(self, request, name):
+        store = get_request_store(request)
+        adapter = IntegrationRegistry.get_adapter(name)
+        if not adapter:
+            return Response({'error': f"اتصال '{name}' یافت نشد."}, status=status.HTTP_404_NOT_FOUND)
+
+        record = adapter.get_store_config_record(store)
+        status_val = adapter.get_status(store)
+        health = adapter.health_check(store)
+
+        return Response({
+            'id': adapter.name,
+            'name': adapter.name,
+            'category': adapter.category,
+            'display_name_fa': adapter.display_name_fa,
+            'description_fa': adapter.description_fa,
+            'guide_fa': adapter.guide_fa,
+            'status': status_val,
+            'is_active': record.is_active if record else (status_val in (IntegrationState.ACTIVE, IntegrationState.CONNECTED)),
+            'is_ready': adapter.is_ready(store),
+            'message': health.message,
+            'last_tested_at': record.last_tested_at.isoformat() if (record and record.last_tested_at) else None,
+            'last_connected_at': record.last_connected_at.isoformat() if (record and record.last_connected_at) else None,
+            'last_test_error': record.last_test_error if record else "",
+            'last_test_success': record.last_test_success if record else None,
+            'schema': adapter.get_schema(),
+            'config': adapter.get_config(store, decrypted=False)
+        })
+
+
+class IntegrationSaveConfigView(APIView):
+    permission_classes = [permissions.IsAuthenticated, IsStoreAdminOrOwnerPermission]
+
+    def post(self, request, name):
+        store = get_request_store(request)
+        adapter = IntegrationRegistry.get_adapter(name)
+        if not adapter:
+            return Response({'error': f"اتصال '{name}' یافت نشد."}, status=status.HTTP_404_NOT_FOUND)
+
+        raw_config = request.data.get('config')
+        if raw_config is None:
+            raw_config = request.data
+
+        if not isinstance(raw_config, dict):
+            return Response({'error': 'فرمت پارامتر تنظیمات نامعتبر است.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        record = adapter.save_config(store, raw_config)
+        return Response({
+            'success': True,
+            'message': f"تنظیمات اتصال '{adapter.display_name_fa}' با موفقیت ذخیره شد.",
+            'status': record.status,
+            'is_active': record.is_active,
+            'config': adapter.get_config(store, decrypted=False)
+        })
+
+
+class IntegrationTestView(APIView):
+    permission_classes = [permissions.IsAuthenticated, IsStoreAdminOrOwnerPermission]
+
+    def post(self, request, name):
+        store = get_request_store(request)
+        adapter = IntegrationRegistry.get_adapter(name)
+        if not adapter:
+            return Response({'error': f"اتصال '{name}' یافت نشد."}, status=status.HTTP_404_NOT_FOUND)
+
+        health_result = adapter.test_connection(store)
+        is_healthy = health_result.to_dict()['is_healthy']
+        status_code = status.HTTP_200_OK if is_healthy else status.HTTP_400_BAD_REQUEST
+
+        return Response({
+            'success': is_healthy,
+            'status': health_result.state,
+            'message': health_result.message,
+            'details': health_result.details
+        }, status=status_code)
+
+
+class IntegrationActivateView(APIView):
+    permission_classes = [permissions.IsAuthenticated, IsStoreAdminOrOwnerPermission]
+
+    def post(self, request, name):
+        store = get_request_store(request)
+        adapter = IntegrationRegistry.get_adapter(name)
+        if not adapter:
+            return Response({'error': f"اتصال '{name}' یافت نشد."}, status=status.HTTP_404_NOT_FOUND)
+
+        success, msg = adapter.activate(store)
+        return Response({
+            'success': success,
+            'message': msg,
+            'status': adapter.get_status(store),
+            'is_active': True
+        })
+
+
+class IntegrationDeactivateView(APIView):
+    permission_classes = [permissions.IsAuthenticated, IsStoreAdminOrOwnerPermission]
+
+    def post(self, request, name):
+        store = get_request_store(request)
+        adapter = IntegrationRegistry.get_adapter(name)
+        if not adapter:
+            return Response({'error': f"اتصال '{name}' یافت نشد."}, status=status.HTTP_404_NOT_FOUND)
+
+        success, msg = adapter.deactivate(store)
+        return Response({
+            'success': success,
+            'message': msg,
+            'status': adapter.get_status(store),
+            'is_active': False
+        })
+
+
+class IntegrationTestSMSView(APIView):
+    permission_classes = [permissions.IsAuthenticated, IsStoreAdminOrOwnerPermission]
+
+    def post(self, request, name):
+        store = get_request_store(request)
+        adapter = IntegrationRegistry.get_adapter(name)
+        if not adapter or not hasattr(adapter, 'send_test_sms'):
+            return Response({'error': f"سرویس '{name}' از قابلیت ارسال پیامک تستی پشتیبانی نمی‌کند."}, status=status.HTTP_400_BAD_REQUEST)
+
+        to_phone = request.data.get('to', '').strip()
+        if not to_phone:
+            return Response({'error': 'شماره تلفن مقصد جهت ارسال پیامک تستی الزامی است.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        res = adapter.send_test_sms(to=to_phone, store=store)
+        if res.get('status') == 'ACCEPTED':
+            return Response({
+                'success': True,
+                'message': f"پیامک آزمایشی با موفقیت به شماره {to_phone} ارسال شد.",
+                'details': res
+            })
+        return Response({
+            'success': False,
+            'error': res.get('error') or res.get('message') or 'ارسال پیامک آزمایشی ناموفق بود.',
+            'details': res
+        }, status=status.HTTP_400_BAD_REQUEST)
+
+
+class IntegrationTestEmailView(APIView):
+    permission_classes = [permissions.IsAuthenticated, IsStoreAdminOrOwnerPermission]
+
+    def post(self, request, name):
+        store = get_request_store(request)
+        adapter = IntegrationRegistry.get_adapter(name)
+        if not adapter or not hasattr(adapter, 'send_email'):
+            return Response({'error': f"سرویس '{name}' از قابلیت ارسال ایمیل تستی پشتیبانی نمی‌کند."}, status=status.HTTP_400_BAD_REQUEST)
+
+        to_email = request.data.get('to', '').strip()
+        if not to_email or '@' not in to_email:
+            return Response({'error': 'آدرس ایمیل معتبر مقصد الزامی است.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        subject = f"ایمیل آزمایشی شاپ‌پایلوت - فروشگاه {store.name}"
+        body = f"""
+        <div dir="rtl" style="font-family: Tahoma, sans-serif; padding: 20px; border: 1px solid #e2e8f0; border-radius: 12px;">
+            <h2 style="color: #2563eb;">اتصال ایمیل با موفقیت تأیید شد</h2>
+            <p>این یک ایمیل آزمایشی جهت اطمینان از صحت پیکربندی سرور SMTP در فروشگاه <strong>{store.name}</strong> است.</p>
+            <p style="color: #64748b; font-size: 12px;">زمان ارسال: {timezone.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
+        </div>
+        """
+        ok = adapter.send_email(to=to_email, subject=subject, html_body=body, store=store)
+        if ok:
+            return Response({
+                'success': True,
+                'message': f"ایمیل آزمایشی با موفقیت به {to_email} ارسال شد."
+            })
+        return Response({
+            'success': False,
+            'error': 'ارسال ایمیل آزمایشی ناموفق بود. لطفاً تنظیمات سرور و احراز هویت را بررسی فرمایید.'
+        }, status=status.HTTP_400_BAD_REQUEST)
 
 
 class IntegrationConfigView(APIView):
@@ -382,8 +589,19 @@ class IntegrationConfigView(APIView):
         settings.integration_states = states
         settings.save()
 
+        # Also update StoreIntegrationConfig if present
+        config_record = StoreIntegrationConfig.objects.filter(store=store, integration_id=name).first()
+        if config_record:
+            config_record.status = new_state
+            if new_state in (IntegrationState.DISABLED, IntegrationState.DISABLED_BY_STORE):
+                config_record.is_active = False
+            elif new_state in (IntegrationState.ACTIVE, IntegrationState.CONNECTED):
+                config_record.is_active = True
+            config_record.save()
+
         return Response({
             'name': name,
             'state': new_state,
             'message': f"وضعیت اتصال سرویس '{name}' بروزرسانی شد."
         })
+

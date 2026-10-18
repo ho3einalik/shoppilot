@@ -81,7 +81,24 @@ class BasePaymentGateway(ABC):
 class ZarinpalGatewayAdapter(BasePaymentGateway):
     gateway_name = "zarinpal"
 
+    def _get_config(self, store=None) -> Dict[str, Any]:
+        if store:
+            try:
+                from apps.features.adapters import IntegrationRegistry
+                adapter = IntegrationRegistry.get_adapter('payment_zarinpal')
+                if adapter:
+                    cfg = adapter.get_config(store, decrypted=True)
+                    if cfg.get('merchant_id'):
+                        return cfg
+            except Exception:
+                pass
+        return {}
+
     def _get_merchant_id(self, store=None) -> Optional[str]:
+        cfg = self._get_config(store)
+        if cfg.get('merchant_id'):
+            return cfg.get('merchant_id')
+
         merchant_id = os.environ.get('ZARINPAL_MERCHANT_ID')
         if not merchant_id and store:
             settings = getattr(store, 'feature_settings', None)
@@ -89,8 +106,12 @@ class ZarinpalGatewayAdapter(BasePaymentGateway):
                 merchant_id = settings.feature_configs.get('zarinpal_merchant_id')
         return merchant_id
 
-    def _is_sandbox(self) -> bool:
+    def _is_sandbox(self, store=None) -> bool:
+        cfg = self._get_config(store)
+        if 'is_sandbox' in cfg and cfg.get('is_sandbox') is not None:
+            return bool(cfg.get('is_sandbox'))
         return os.environ.get('ZARINPAL_SANDBOX', 'False').lower() in ('true', '1', 't')
+
 
     def request_payment(self, amount: Decimal, callback_url: str, description: str, order_id: str, store=None, currency: str = 'IRT') -> Dict[str, Any]:
         merchant_id = self._get_merchant_id(store)
@@ -110,7 +131,7 @@ class ZarinpalGatewayAdapter(BasePaymentGateway):
                 'message': str(e.detail[0]) if hasattr(e, 'detail') and isinstance(e.detail, list) else str(e)
             }
 
-        prefix = "sandbox" if self._is_sandbox() else "www"
+        prefix = "sandbox" if self._is_sandbox(store) else "www"
         url = f"https://{prefix}.zarinpal.com/pg/rest/WebGate/PaymentRequest.json"
 
         payload = {
@@ -173,7 +194,7 @@ class ZarinpalGatewayAdapter(BasePaymentGateway):
                 message=str(e.detail[0]) if hasattr(e, 'detail') and isinstance(e.detail, list) else str(e)
             )
 
-        prefix = "sandbox" if self._is_sandbox() else "www"
+        prefix = "sandbox" if self._is_sandbox(store) else "www"
         url = f"https://{prefix}.zarinpal.com/pg/rest/WebGate/PaymentVerification.json"
         payload = {
             'MerchantID': merchant_id,

@@ -599,12 +599,115 @@ class ApiClient {
     }>>('/features/integrations/');
   }
 
+  async getCanonicalIntegrations() {
+    return this.request<Array<{
+      id: string;
+      name: string;
+      category: string;
+      display_name_fa: string;
+      description_fa: string;
+      guide_fa: string;
+      status: string;
+      is_active: boolean;
+      is_ready: boolean;
+      message: string;
+      last_tested_at?: string;
+      last_connected_at?: string;
+      last_test_error?: string;
+      last_test_success?: boolean;
+      schema: Array<{
+        name: string;
+        label_fa: string;
+        type: 'text' | 'password' | 'number' | 'boolean' | 'select' | 'url';
+        required: boolean;
+        is_secret: boolean;
+        help_text_fa?: string;
+        placeholder?: string;
+        default?: any;
+        options?: Array<{ value: string; label: string }>;
+      }>;
+      config: Record<string, any>;
+    }>>('/features/integrations/?canonical=true');
+  }
+
+  async getIntegrationDetail(name: string) {
+    return this.request<any>(`/features/integrations/${name}/`);
+  }
+
+  async saveIntegrationConfig(name: string, config: Record<string, any>) {
+    return this.request<{
+      success: boolean;
+      message: string;
+      status: string;
+      is_active: boolean;
+      config: Record<string, any>;
+    }>(`/features/integrations/${name}/save/`, {
+      method: 'POST',
+      body: JSON.stringify({ config }),
+    });
+  }
+
+  async testIntegration(name: string) {
+    return this.request<{
+      success: boolean;
+      status: string;
+      message: string;
+      details?: Record<string, any>;
+    }>(`/features/integrations/${name}/test/`, {
+      method: 'POST',
+    });
+  }
+
+  async activateIntegration(name: string) {
+    return this.request<{
+      success: boolean;
+      message: string;
+      status: string;
+      is_active: boolean;
+    }>(`/features/integrations/${name}/activate/`, {
+      method: 'POST',
+    });
+  }
+
+  async deactivateIntegration(name: string) {
+    return this.request<{
+      success: boolean;
+      message: string;
+      status: string;
+      is_active: boolean;
+    }>(`/features/integrations/${name}/deactivate/`, {
+      method: 'POST',
+    });
+  }
+
+  async sendTestSMS(name: string, to: string) {
+    return this.request<{
+      success: boolean;
+      message: string;
+      details?: any;
+    }>(`/features/integrations/${name}/send-test-sms/`, {
+      method: 'POST',
+      body: JSON.stringify({ to }),
+    });
+  }
+
+  async sendTestEmail(name: string, to: string) {
+    return this.request<{
+      success: boolean;
+      message: string;
+    }>(`/features/integrations/${name}/send-test-email/`, {
+      method: 'POST',
+      body: JSON.stringify({ to }),
+    });
+  }
+
   async configureIntegration(name: string, state: string, credentials?: Record<string, any>) {
     return this.request<any>('/features/integrations/configure/', {
       method: 'POST',
       body: JSON.stringify({ name, state, credentials: credentials || {} }),
     });
   }
+
 
   // Subscription Invoices & Checkout
   async getSubscriptionInvoices() {

@@ -23,6 +23,7 @@ import {
   Tag,
   Sparkles,
   Store,
+  Link2,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useAuth } from '@/contexts/AuthContext';
@@ -49,6 +50,7 @@ const mainNavItems: NavItem[] = [
   { href: '/marketing', label: 'تخفیف‌ها و اتوماسیون', icon: Tag },
   { href: '/intelligence', label: 'هوش تجاری و پیش‌بینی', icon: Sparkles },
   { href: '/team', label: 'تیم و دسترسی‌ها', icon: Users },
+  { href: '/settings/integrations', label: 'اتصال‌ها و یکپارچه‌سازی‌ها', icon: Link2 },
   { href: '/settings/features', label: 'تنظیمات و ماژول‌ها', icon: Settings },
 ];
 
