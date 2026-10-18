@@ -101,3 +101,54 @@ class PurchaseOrderItem(models.Model):
 
     def __str__(self):
         return f"{self.variant.sku} x {self.quantity_ordered} ({self.quantity_received} received)"
+
+
+class RejectionReason(models.TextChoices):
+    DEFECTIVE = 'DEFECTIVE', 'کالای معیوب یا دارای نقص فنی'
+    DAMAGED = 'DAMAGED', 'آسیب‌دیده در حین حمل و نقل'
+    WRONG_ITEM = 'WRONG_ITEM', 'ارسال کالای اشتباه'
+    EXPIRED = 'EXPIRED', 'منقضی شده یا فاسد'
+    SPEC_MISMATCH = 'SPEC_MISMATCH', 'عدم انطباق با مشخصات سفارش'
+    OTHER = 'OTHER', 'سایر موارد'
+
+
+class GoodsReceiptInspection(TenantScopedModel):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    purchase_order = models.ForeignKey(
+        PurchaseOrder,
+        on_delete=models.CASCADE,
+        related_name='inspections',
+        verbose_name="سفارش خرید"
+    )
+    variant = models.ForeignKey(
+        ProductVariant,
+        on_delete=models.PROTECT,
+        related_name='goods_inspections',
+        verbose_name="تنوع کالا"
+    )
+    quantity_received = models.PositiveIntegerField(verbose_name="تعداد کل اقلام تحویلی")
+    quantity_accepted = models.PositiveIntegerField(verbose_name="تعداد اقلام تاییدشده و وارده به انبار")
+    quantity_rejected = models.PositiveIntegerField(default=0, verbose_name="تعداد اقلام مردودشده (غیرقابل ورود به انبار)")
+    rejection_reason = models.CharField(
+        max_length=30,
+        choices=RejectionReason.choices,
+        blank=True,
+        verbose_name="علت رد اقلام"
+    )
+    inspection_notes = models.TextField(blank=True, verbose_name="گزارش کارشناسی و بازرسی فنی")
+    inspected_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        verbose_name="کارشناس کنترل کیفیت"
+    )
+    inspected_at = models.DateTimeField(auto_now_add=True, verbose_name="زمان بازرسی")
+
+    class Meta:
+        verbose_name = 'برگه بازرسی و کنترل کیفیت ورودی انبار'
+        verbose_name_plural = 'برگه‌های بازرسی و کنترل کیفیت ورودی انبار'
+        ordering = ['-inspected_at']
+
+    def __str__(self):
+        return f"بازرسی {self.purchase_order.po_number} - {self.variant.sku}: تایید={self.quantity_accepted}، رد={self.quantity_rejected}"

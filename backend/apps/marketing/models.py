@@ -286,3 +286,52 @@ class CampaignAttribution(models.Model):
     def __str__(self):
         return f"{self.order.order_number}: {self.utm_source}/{self.utm_campaign} ({self.attributed_revenue:,} تومان)"
 
+
+class CampaignChannel(models.TextChoices):
+    SMS = 'SMS', 'پیامک اطلاع‌رسانی'
+    EMAIL = 'EMAIL', 'ایمیل مارکتینگ'
+
+
+class CampaignStatus(models.TextChoices):
+    DRAFT = 'DRAFT', 'پیش‌نویس'
+    SCHEDULED = 'SCHEDULED', 'زمان‌بندی شده'
+    SENDING = 'SENDING', 'در حال ارسال'
+    SENT = 'SENT', 'ارسال شده و پایان‌یافته'
+    CANCELLED = 'CANCELLED', 'لغو شده'
+
+
+class MarketingCampaign(TenantScopedModel):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    name = models.CharField(max_length=200, verbose_name="نام کمپین بازاریابی")
+    target_segment = models.CharField(max_length=50, default='ALL', verbose_name="بخش هدف مشتریان (Segment)")
+    channel = models.CharField(
+        max_length=20,
+        choices=CampaignChannel.choices,
+        default=CampaignChannel.SMS,
+        verbose_name="کانال ارسال"
+    )
+    message_template = models.TextField(verbose_name="متن پیام کمپین")
+    status = models.CharField(
+        max_length=20,
+        choices=CampaignStatus.choices,
+        default=CampaignStatus.DRAFT,
+        verbose_name="وضعیت کمپین"
+    )
+    recipient_count = models.PositiveIntegerField(default=0, verbose_name="تعداد کل مخاطبان واجد شرایط")
+    sent_count = models.PositiveIntegerField(default=0, verbose_name="تعداد پیام‌های ارسال‌شده")
+    delivered_count = models.PositiveIntegerField(default=0, verbose_name="تعداد پیام‌های تحویل‌شده")
+    failed_count = models.PositiveIntegerField(default=0, verbose_name="تعداد پیام‌های ناموفق")
+    attributed_revenue = models.DecimalField(max_digits=14, decimal_places=0, default=Decimal('0'), verbose_name="درآمد منتسب‌شده")
+    attributed_orders_count = models.PositiveIntegerField(default=0, verbose_name="تعداد سفارشات منتسب‌شده")
+    scheduled_at = models.DateTimeField(null=True, blank=True, verbose_name="زمان مقرر ارسال")
+    sent_at = models.DateTimeField(null=True, blank=True, verbose_name="زمان اتمام ارسال")
+    created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True)
+
+    class Meta:
+        verbose_name = 'کمپین بازاریابی'
+        verbose_name_plural = 'کمپین‌های بازاریابی'
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"{self.name} ({self.get_channel_display()}) - {self.get_status_display()}"
+

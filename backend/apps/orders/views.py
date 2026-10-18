@@ -170,3 +170,72 @@ class OrderViewSet(viewsets.ModelViewSet):
             return Response(result, status=status.HTTP_200_OK)
         except Exception as e:
             return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+
+from rest_framework.views import APIView
+from rest_framework.permissions import AllowAny
+from apps.tenancy.models import Store
+from .models import WooCommerceSyncLog
+from .services_woocommerce import sync_woocommerce_products, sync_woocommerce_orders, handle_woocommerce_webhook
+import logging
+
+logger = logging.getLogger(__name__)
+
+
+class WooCommerceSyncView(APIView):
+    permission_classes = [IsStoreMemberPermission]
+
+    def post(self, request, action_name=None):
+        action = request.data.get('action') or action_name
+        try:
+            if action == 'sync-products':
+                res = sync_woocommerce_products(request.store)
+                return Response(res, status=status.HTTP_200_OK)
+            elif action == 'sync-orders':
+                res = sync_woocommerce_orders(request.store)
+                return Response(res, status=status.HTTP_200_OK)
+            return Response({'error': 'عملیات نامعتبر است (گزینه‌های مجاز: sync-products, sync-orders)'}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception as e:
+            return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+    def get(self, request):
+        logs = WooCommerceSyncLog.objects.filter(store=request.store).order_by('-created_at')[:20]
+        data = [
+            {
+                'id': str(log.id),
+                'sync_type': log.sync_type,
+                'sync_type_display': log.get_sync_type_display(),
+                'status': log.status,
+                'status_display': log.get_status_display(),
+                'items_synced': log.items_synced,
+                'error_details': log.error_details,
+                'created_at': log.created_at.strftime('%Y-%m-%d %H:%M:%S'),
+            }
+            for log in logs
+        ]
+        return Response(data)
+
+
+class WooCommerceWebhookView(APIView):
+    permission_classes = [AllowAny]
+
+    def post(self, request, store_id):
+        store = Store.objects.filter(id=store_id, is_active=True).first()
+        if not store:
+            return Response({'error': 'فروشگاه یافت نشد.'}, status=status.HTTP_404_NOT_FOUND)
+
+        topic = request.headers.get('X-WC-Webhook-Topic') or request.headers.get('X-Wc-Webhook-Topic', '')
+        signature = request.headers.get('X-WC-Webhook-Signature') or request.headers.get('X-Wc-Webhook-Signature', '')
+
+        try:
+            result = handle_woocommerce_webhook(
+                store=store,
+                topic=topic,
+                raw_body=request.body,
+                signature_header=signature
+            )
+            return Response(result, status=status.HTTP_200_OK)
+        except Exception as e:
+            logger.error(f"WooCommerce webhook error for store {store.id}: {e}")
+            return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+

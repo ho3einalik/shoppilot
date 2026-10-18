@@ -7,7 +7,8 @@ from .views import (
     AbandonedCartViewSet,
     CustomerReferralViewSet,
     ProductRecommendationViewSet,
-    CampaignAttributionViewSet
+    CampaignAttributionViewSet,
+    MarketingCampaignViewSet
 )
 
 router = DefaultRouter()
@@ -18,7 +19,9 @@ router.register(r'abandoned-carts', AbandonedCartViewSet, basename='abandoned-ca
 router.register(r'referrals', CustomerReferralViewSet, basename='customer-referral')
 router.register(r'recommendations', ProductRecommendationViewSet, basename='product-recommendation')
 router.register(r'attributions', CampaignAttributionViewSet, basename='campaign-attribution')
+router.register(r'campaigns', MarketingCampaignViewSet, basename='marketing-campaign')
 
 urlpatterns = [
     path('', include(router.urls)),
 ]
+

@@ -633,6 +633,342 @@ class InstagramIntegrationAdapter(BaseIntegrationAdapter):
             )
         return res
 
+    def publish_content_to_instagram(self, store, content) -> Dict[str, Any]:
+        """
+        Executes real publication to Instagram via Meta Graph API:
+        1. Validates store connection is active
+        2. Validates media assets (Meta requires accessible image/video URL)
+        3. Creates media container (POST /{account_id}/media)
+        4. Publishes container (POST /{account_id}/media_publish)
+        5. Fetches real permalink and post ID
+        """
+        record = self.get_store_config_record(store)
+        if not record or not record.is_active or record.status not in (IntegrationState.ACTIVE, IntegrationState.CONNECTED):
+            raise ValidationError("اتصال اینستاگرام تجاری برای این فروشگاه فعال نشده است. لطفاً ابتدا در تنظیمات اتصال‌ها، اتصال را تست و فعال نمایید.")
+
+        config = self.get_config(store, decrypted=True)
+        token = config.get('access_token')
+        account_id = config.get('instagram_account_id')
+
+        if not token or not account_id:
+            raise ValidationError("کلید دسترسی (Access Token) یا شناسه پیج اینستاگرام تنظیم نشده است.")
+
+        media_url = content.thumbnail_url or (content.media_urls[0] if content.media_urls else '')
+        if not media_url:
+            raise ValidationError("برای انتشار در اینستاگرام، تعیین حداقل یک فایل رسانه‌ای (تصویر یا ویدیو) الزامی است.")
+
+        if not (media_url.startswith('http://') or media_url.startswith('https://')):
+            raise ValidationError("آدرس فایل رسانه‌ای اینستاگرام باید یک نشانی معتبر اینترنتی (HTTP/HTTPS) قابل دسترس توسط سرورهای متا باشد.")
+
+        caption_parts = []
+        if content.caption:
+            caption_parts.append(content.caption.strip())
+        if content.hashtags:
+            caption_parts.append(content.hashtags.strip())
+        full_caption = "\n\n".join(caption_parts)
+
+        # Step 1: Create media container
+        container_url = f"https://graph.facebook.com/v19.0/{account_id}/media"
+        post_data = {
+            'caption': full_caption,
+            'access_token': token
+        }
+        from apps.social.models import ContentType
+        if content.content_type == ContentType.REEL:
+            post_data['media_type'] = 'REELS'
+            post_data['video_url'] = media_url
+        elif content.content_type == ContentType.STORY:
+            post_data['media_type'] = 'STORIES'
+            post_data['image_url'] = media_url
+        else:
+            post_data['image_url'] = media_url
+
+        try:
+            encoded_data = urllib.parse.urlencode(post_data).encode('utf-8')
+            req = urllib.request.Request(container_url, data=encoded_data, method='POST')
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                res_body = json.loads(resp.read().decode('utf-8'))
+                container_id = res_body.get('id')
+
+            if not container_id:
+                raise ValidationError("شناسه کانتینر رسانه (Container ID) از سرور متا دریافت نشد.")
+
+            # Step 2: Publish container
+            publish_url = f"https://graph.facebook.com/v19.0/{account_id}/media_publish"
+            publish_data = {
+                'creation_id': container_id,
+                'access_token': token
+            }
+            encoded_pub = urllib.parse.urlencode(publish_data).encode('utf-8')
+            pub_req = urllib.request.Request(publish_url, data=encoded_pub, method='POST')
+            with urllib.request.urlopen(pub_req, timeout=15) as pub_resp:
+                pub_res_body = json.loads(pub_resp.read().decode('utf-8'))
+                media_id = pub_res_body.get('id')
+
+            if not media_id:
+                raise ValidationError("شناسه پست منتشر شده (Media ID) از سرور متا دریافت نشد.")
+
+            # Step 3: Fetch permalink
+            info_url = f"https://graph.facebook.com/v19.0/{media_id}?fields=id,permalink&access_token={token}"
+            info_req = urllib.request.Request(info_url, method='GET')
+            permalink = f"https://www.instagram.com/p/{media_id}/"
+            try:
+                with urllib.request.urlopen(info_req, timeout=10) as info_resp:
+                    info_data = json.loads(info_resp.read().decode('utf-8'))
+                    permalink = info_data.get('permalink') or permalink
+            except Exception:
+                pass
+
+            return {
+                'status': 'SUCCESS',
+                'external_post_id': str(media_id),
+                'published_url': permalink
+            }
+
+        except urllib.error.HTTPError as e:
+            try:
+                err_data = json.loads(e.read().decode('utf-8'))
+                meta_err = err_data.get('error', {})
+                err_msg = meta_err.get('message', str(e))
+                err_code = meta_err.get('code')
+            except Exception:
+                err_msg = str(e)
+                err_code = None
+
+            if err_code in (190, 102):
+                record.status = IntegrationState.REAUTH_REQUIRED
+                record.is_active = False
+                record.save(update_fields=['status', 'is_active', 'updated_at'])
+
+            raise ValidationError(f"خطای وب‌سرویس اینستاگرام (متا): {err_msg}")
+        except Exception as e:
+            if isinstance(e, ValidationError):
+                raise
+            raise ValidationError(f"خطا در برقراری ارتباط با وب‌سرویس اینستاگرام: {str(e)}")
+
+    def fetch_live_metrics(self, store, external_post_id: str) -> Dict[str, Any]:
+        config = self.get_config(store, decrypted=True)
+        token = config.get('access_token')
+        if not token or not external_post_id:
+            return {'is_live': False, 'message': 'کلید اتصال یا شناسه پست در دسترس نیست.'}
+
+        url = f"https://graph.facebook.com/v19.0/{external_post_id}/insights?metric=impressions,reach,saved,engagement&access_token={token}"
+        try:
+            req = urllib.request.Request(url, method='GET')
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                data = json.loads(resp.read().decode('utf-8'))
+                metrics = {}
+                for item in data.get('data', []):
+                    metric_name = item.get('name')
+                    val = item.get('values', [{}])[0].get('value', 0)
+                    metrics[metric_name] = val
+                return {
+                    'is_live': True,
+                    'impressions': metrics.get('impressions', 0),
+                    'reach': metrics.get('reach', 0),
+                    'saves': metrics.get('saved', 0),
+                    'engagement': metrics.get('engagement', 0)
+                }
+        except Exception as e:
+            logger.warning(f"Failed to fetch live Instagram metrics for {external_post_id}: {e}")
+            return {'is_live': False, 'message': f'عدم امکان استعلام آمار زنده از متا: {str(e)}'}
+
+    def send_direct_message(self, store, recipient_id: str, text: str) -> Dict[str, Any]:
+        """
+        Sends an Instagram Direct message via Meta Graph API Send endpoint.
+        """
+        record = self.get_store_config_record(store)
+        if not record or not record.is_active:
+            return {'status': 'LOCAL_ONLY', 'error': 'اتصال رسمی اینستاگرام فعال نیست.'}
+
+        config = self.get_config(store, decrypted=True)
+        token = config.get('access_token')
+        if not token:
+            return {'status': 'FAILED', 'error': 'توکن اتصال اینستاگرام یافت نشد.'}
+
+        url = f"https://graph.facebook.com/v19.0/me/messages?access_token={token}"
+        payload = {
+            'recipient': {'id': recipient_id.lstrip('@')},
+            'message': {'text': text}
+        }
+        try:
+            req_data = json.dumps(payload).encode('utf-8')
+            req = urllib.request.Request(url, data=req_data, headers={'Content-Type': 'application/json'}, method='POST')
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                res_body = json.loads(resp.read().decode('utf-8'))
+                return {
+                    'status': 'DELIVERED',
+                    'message_id': res_body.get('message_id', ''),
+                    'recipient_id': res_body.get('recipient_id', recipient_id)
+                }
+        except urllib.error.HTTPError as e:
+            try:
+                err_data = json.loads(e.read().decode('utf-8'))
+                err_msg = err_data.get('error', {}).get('message', str(e))
+            except Exception:
+                err_msg = str(e)
+            return {'status': 'FAILED', 'error': err_msg}
+        except Exception as e:
+            return {'status': 'FAILED', 'error': str(e)}
+
+
+# -----------------------------------------------------------------------------
+# 2b. Telegram Bot & Channel Adapter
+# -----------------------------------------------------------------------------
+class TelegramIntegrationAdapter(BaseIntegrationAdapter):
+    name = "social_telegram"
+    category = "SOCIAL"
+    display_name_fa = "ربات و کانال تلگرام (Telegram Bot API)"
+    description_fa = "ارسال پیام به کانال و گروه‌ها، دریافت سفارشات و پاسخ‌گویی به مشتریان در پیام‌رسان تلگرام"
+    guide_fa = "جهت اتصال به تلگرام، ابتدا در ربات @BotFather یک ربات ایجاد نموده و توکن اختصاصی (Bot Token) را در فیلد زیر وارد فرمایید. در صورت تمایل به انتشار خودکار پست‌ها در کانال، ربات را به عنوان ادمین کانال اضافه نموده و آیدی کانال را وارد نمایید."
+
+    def get_schema(self) -> List[Dict[str, Any]]:
+        return [
+            {
+                'name': 'bot_token',
+                'label_fa': 'توکن ربات تلگرام (Bot Token)',
+                'type': 'password',
+                'required': True,
+                'is_secret': True,
+                'placeholder': '123456789:ABCdefGhIJKlmNoPQRsTUVwxyZ...',
+                'help_text_fa': 'توکن دریافتی از @BotFather جهت برقراری ارتباط با API رسمی تلگرام.'
+            },
+            {
+                'name': 'channel_id',
+                'label_fa': 'شناسه یا آدرس کانال تلگرام',
+                'type': 'text',
+                'required': False,
+                'is_secret': False,
+                'placeholder': 'مثلاً @MyStoreChannel یا -1001234567890',
+                'help_text_fa': 'آیدی عمومی یا عددی کانال که ربات ادمین آن است (جهت انتشار پست‌های فروشگاه).'
+            },
+            {
+                'name': 'webhook_secret',
+                'label_fa': 'رمز امنیتی وب‌هوک (اختیاری)',
+                'type': 'password',
+                'required': False,
+                'is_secret': True,
+                'placeholder': 'secret_token_123',
+                'help_text_fa': 'رمز secret_token برای راستی‌آزمایی درخواست‌های وب‌هوک ارسالی از سرورهای تلگرام.'
+            }
+        ]
+
+    def _get_fallback_config(self, store, decrypted: bool = False) -> Dict[str, Any]:
+        token = os.environ.get('TELEGRAM_BOT_TOKEN', '')
+        return {
+            'bot_token': token if decrypted else mask_secret(token),
+            'bot_token_is_set': bool(token),
+            'channel_id': os.environ.get('TELEGRAM_CHANNEL_ID', ''),
+            'webhook_secret': ''
+        }
+
+    def _execute_live_test(self, store, **kwargs) -> IntegrationHealthResult:
+        config = self.get_config(store, decrypted=True)
+        token = config.get('bot_token')
+        if not token:
+            return IntegrationHealthResult(
+                state=IntegrationState.NOT_CONFIGURED,
+                message="توکن ربات تلگرام تنظیم نشده است."
+            )
+
+        url = f"https://api.telegram.org/bot{token}/getMe"
+        try:
+            req = urllib.request.Request(url, headers={'Accept': 'application/json'}, method='GET')
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                if resp.status == 200:
+                    data = json.loads(resp.read().decode('utf-8'))
+                    if data.get('ok'):
+                        bot_info = data.get('result', {})
+                        username = bot_info.get('username', '')
+                        first_name = bot_info.get('first_name', '')
+                        return IntegrationHealthResult(
+                            state=IntegrationState.READY,
+                            message=f"اتصال به ربات تلگرام @{username} ({first_name}) با موفقیت برقرار شد.",
+                            details={'bot_username': username, 'bot_id': bot_info.get('id')}
+                        )
+                return IntegrationHealthResult(
+                    state=IntegrationState.TEST_FAILED,
+                    message="پاسخ ناموفق از سرور تلگرام دریافت شد."
+                )
+        except urllib.error.HTTPError as e:
+            return IntegrationHealthResult(
+                state=IntegrationState.TEST_FAILED,
+                message=f"خطای احراز هویت توکن ربات تلگرام: کد {e.code}"
+            )
+        except Exception as e:
+            return IntegrationHealthResult(
+                state=IntegrationState.TEST_FAILED,
+                message=f"عدم برقراری ارتباط با سرورهای تلگرام: {str(e)}"
+            )
+
+    def send_message(self, store, chat_id: str, text: str) -> Dict[str, Any]:
+        config = self.get_config(store, decrypted=True)
+        token = config.get('bot_token')
+        if not token or not chat_id:
+            return {'status': 'FAILED', 'error': 'توکن ربات یا شناسه چت تنظیم نشده است.'}
+
+        url = f"https://api.telegram.org/bot{token}/sendMessage"
+        payload = {
+            'chat_id': chat_id,
+            'text': text,
+            'parse_mode': 'HTML'
+        }
+        try:
+            req_data = json.dumps(payload).encode('utf-8')
+            req = urllib.request.Request(url, data=req_data, headers={'Content-Type': 'application/json'}, method='POST')
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                data = json.loads(resp.read().decode('utf-8'))
+                if data.get('ok'):
+                    msg_id = data.get('result', {}).get('message_id')
+                    return {'status': 'DELIVERED', 'message_id': str(msg_id)}
+                return {'status': 'FAILED', 'error': data.get('description', 'خطای نامشخص تلگرام')}
+        except Exception as e:
+            return {'status': 'FAILED', 'error': str(e)}
+
+    def publish_content_to_telegram(self, store, content) -> Dict[str, Any]:
+        config = self.get_config(store, decrypted=True)
+        token = config.get('bot_token')
+        channel_id = config.get('channel_id')
+        if not token or not channel_id:
+            raise ValidationError("توکن ربات یا آیدی کانال تلگرام برای انتشار تنظیم نشده است.")
+
+        media_url = content.thumbnail_url or (content.media_urls[0] if content.media_urls else '')
+        caption_parts = []
+        if content.title:
+            caption_parts.append(f"<b>{content.title}</b>")
+        if content.caption:
+            caption_parts.append(content.caption.strip())
+        if content.hashtags:
+            caption_parts.append(content.hashtags.strip())
+        full_text = "\n\n".join(caption_parts)
+
+        if media_url and (media_url.startswith('http://') or media_url.startswith('https://')):
+            url = f"https://api.telegram.org/bot{token}/sendPhoto"
+            payload = {'chat_id': channel_id, 'photo': media_url, 'caption': full_text, 'parse_mode': 'HTML'}
+        else:
+            url = f"https://api.telegram.org/bot{token}/sendMessage"
+            payload = {'chat_id': channel_id, 'text': full_text, 'parse_mode': 'HTML'}
+
+        try:
+            req_data = json.dumps(payload).encode('utf-8')
+            req = urllib.request.Request(url, data=req_data, headers={'Content-Type': 'application/json'}, method='POST')
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                data = json.loads(resp.read().decode('utf-8'))
+                if data.get('ok'):
+                    msg_id = data.get('result', {}).get('message_id')
+                    channel_clean = channel_id.lstrip('@')
+                    pub_url = f"https://t.me/{channel_clean}/{msg_id}" if not channel_id.startswith('-') else ""
+                    return {
+                        'status': 'SUCCESS',
+                        'external_post_id': str(msg_id),
+                        'published_url': pub_url
+                    }
+                raise ValidationError(f"خطای ارسال تلگرام: {data.get('description')}")
+        except Exception as e:
+            if isinstance(e, ValidationError):
+                raise
+            raise ValidationError(f"عدم برقراری ارتباط با تلگرام: {str(e)}")
+
 
 # -----------------------------------------------------------------------------
 # 3. Payment Gateway: Zarinpal
@@ -1212,6 +1548,165 @@ class SMTPEmailAdapter(BaseIntegrationAdapter):
 
 
 # -----------------------------------------------------------------------------
+# 8. Sales Channel Integration: WooCommerce
+# -----------------------------------------------------------------------------
+class WooCommerceIntegrationAdapter(BaseIntegrationAdapter):
+    name = "ecommerce_woocommerce"
+    category = "SALES_CHANNEL"
+    display_name_fa = "فروشگاه آنلاین ووکامرس (WooCommerce REST API)"
+    description_fa = "همگام‌سازی دوطرفه محصولات، متغیرها، موجودی انبار و دریافت خودکار سفارشات از سایت وردپرس"
+    guide_fa = "برای اتصال به سایت ووکامرسی خود، در پیشخوان وردپرس به مسیر «ووکامرس > پیکربندی > پیشرفته > REST API» رفته و یک کلید با سطح دسترسی خواندن/نوشتن (Read/Write) بسازید. سپس آدرس سایت (URL)، Consumer Key و Consumer Secret را در فیلدهای زیر وارد نمایید."
+
+    def get_schema(self) -> List[Dict[str, Any]]:
+        return [
+            {
+                'name': 'store_url',
+                'label_fa': 'آدرس وب‌سایت فروشگاه (URL)',
+                'type': 'url',
+                'required': True,
+                'is_secret': False,
+                'placeholder': 'https://myshop.com',
+                'help_text_fa': 'آدرس کامل دامنه فروشگاه ووکامرسی به همراه https://.'
+            },
+            {
+                'name': 'consumer_key',
+                'label_fa': 'کلید مصرف‌کننده (Consumer Key)',
+                'type': 'password',
+                'required': True,
+                'is_secret': True,
+                'placeholder': 'ck_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx',
+                'help_text_fa': 'کلید تولید شده در بخش REST API ووکامرس که با ck_ شروع می‌شود.'
+            },
+            {
+                'name': 'consumer_secret',
+                'label_fa': 'رمز مصرف‌کننده (Consumer Secret)',
+                'type': 'password',
+                'required': True,
+                'is_secret': True,
+                'placeholder': 'cs_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx',
+                'help_text_fa': 'رمز اختصاصی API ووکامرس که با cs_ شروع می‌شود.'
+            },
+            {
+                'name': 'sync_inventory',
+                'label_fa': 'همگام‌سازی خودکار موجودی انبار',
+                'type': 'boolean',
+                'required': False,
+                'default': True,
+                'help_text_fa': 'انتقال موجودی انبار شاپ‌پایلوت به عنوان منبع اصلی موجودی به سایت ووکامرس.'
+            },
+            {
+                'name': 'sync_orders',
+                'label_fa': 'دریافت خودکار سفارشات جدید',
+                'type': 'boolean',
+                'required': False,
+                'default': True,
+                'help_text_fa': 'درون‌ریزی سفارشات ثبت‌شده در سایت به کارتابل سفارشات شاپ‌پایلوت.'
+            },
+            {
+                'name': 'webhook_secret',
+                'label_fa': 'رمز وب‌هوک ووکامرس (Secret)',
+                'type': 'password',
+                'required': False,
+                'is_secret': True,
+                'placeholder': 'wc_webhook_secret_key',
+                'help_text_fa': 'کلید مخفی جهت راستی‌آزمایی امضای HMAC-SHA256 وب‌هوک‌های ارسالی از ووکامرس.'
+            }
+        ]
+
+    def _get_fallback_config(self, store, decrypted: bool = False) -> Dict[str, Any]:
+        key = os.environ.get('WOOCOMMERCE_KEY', '')
+        sec = os.environ.get('WOOCOMMERCE_SECRET', '')
+        return {
+            'store_url': os.environ.get('WOOCOMMERCE_URL', ''),
+            'consumer_key': key if decrypted else mask_secret(key),
+            'consumer_key_is_set': bool(key),
+            'consumer_secret': sec if decrypted else mask_secret(sec),
+            'consumer_secret_is_set': bool(sec),
+            'sync_inventory': True,
+            'sync_orders': True,
+            'webhook_secret': ''
+        }
+
+    def _execute_live_test(self, store, **kwargs) -> IntegrationHealthResult:
+        config = self.get_config(store, decrypted=True)
+        store_url = (config.get('store_url') or '').strip().rstrip('/')
+        ck = config.get('consumer_key')
+        cs = config.get('consumer_secret')
+
+        if not store_url or not ck or not cs:
+            return IntegrationHealthResult(
+                state=IntegrationState.NOT_CONFIGURED,
+                message="آدرس فروشگاه، Consumer Key یا Consumer Secret ووکامرس تنظیم نشده است."
+            )
+
+        # SSRF Protection
+        try:
+            validate_custom_url(store_url)
+        except ValidationError as e:
+            return IntegrationHealthResult(
+                state=IntegrationState.TEST_FAILED,
+                message=f"آدرس سایت ووکامرس از نظر امنیتی مجاز نیست: {e}"
+            )
+
+        test_url = f"{store_url}/wp-json/wc/v3/system_status"
+        try:
+            import base64
+            auth_str = f"{ck}:{cs}"
+            auth_header = f"Basic {base64.b64encode(auth_str.encode('utf-8')).decode('utf-8')}"
+            req = urllib.request.Request(
+                test_url,
+                headers={'Authorization': auth_header, 'Accept': 'application/json', 'User-Agent': 'ShopPilot-Integration/1.0'},
+                method='GET'
+            )
+            with urllib.request.urlopen(req, timeout=12) as resp:
+                if resp.status == 200:
+                    data = json.loads(resp.read().decode('utf-8'))
+                    env = data.get('environment', {})
+                    wc_ver = env.get('version', 'معتبر')
+                    site_title = env.get('site_title', store_url)
+                    return IntegrationHealthResult(
+                        state=IntegrationState.READY,
+                        message=f"اتصال به ووکامرس سایت «{site_title}» (نسخه {wc_ver}) با موفقیت برقرار شد.",
+                        details={'wc_version': wc_ver, 'site_title': site_title}
+                    )
+                return IntegrationHealthResult(
+                    state=IntegrationState.TEST_FAILED,
+                    message=f"پاسخ غیرمنتظره از ووکامرس: کد {resp.status}"
+                )
+        except urllib.error.HTTPError as e:
+            if e.code in (401, 403):
+                return IntegrationHealthResult(
+                    state=IntegrationState.TEST_FAILED,
+                    message="کلید یا رمز مصرف‌کننده ووکامرس نامعتبر است یا دسترسی Read/Write ندارد (کد ۴۰۱/۴۰۳)."
+                )
+            elif e.code == 404:
+                try:
+                    alt_url = f"{store_url}/wp-json/wc/v3/products?per_page=1"
+                    alt_req = urllib.request.Request(alt_url, headers={'Authorization': auth_header, 'Accept': 'application/json'}, method='GET')
+                    with urllib.request.urlopen(alt_req, timeout=10) as alt_resp:
+                        if alt_resp.status == 200:
+                            return IntegrationHealthResult(
+                                state=IntegrationState.READY,
+                                message="اتصال به REST API محصولات ووکامرس با موفقیت برقرار شد."
+                            )
+                except Exception:
+                    pass
+                return IntegrationHealthResult(
+                    state=IntegrationState.TEST_FAILED,
+                    message="مسیر REST API ووکامرس در این آدرس یافت نشد (کد ۴۰۴). لطفاً فعال بودن پیوندهای یکتا (Permalinks) در وردپرس را بررسی فرمایید."
+                )
+            return IntegrationHealthResult(
+                state=IntegrationState.TEST_FAILED,
+                message=f"خطای وب‌سرویس ووکامرس: کد {e.code}"
+            )
+        except Exception as e:
+            return IntegrationHealthResult(
+                state=IntegrationState.TEST_FAILED,
+                message=f"عدم برقراری ارتباط با سایت ووکامرس: {str(e)}"
+            )
+
+
+# -----------------------------------------------------------------------------
 # Central Integration Registry
 # -----------------------------------------------------------------------------
 class IntegrationRegistry:
@@ -1221,6 +1716,8 @@ class IntegrationRegistry:
         'sms_gateway': KavenegarSMSAdapter(),  # alias for backward compat
         'instagram': InstagramIntegrationAdapter(),
         'social_instagram': InstagramIntegrationAdapter(),  # alias
+        'social_telegram': TelegramIntegrationAdapter(),
+        'telegram': TelegramIntegrationAdapter(),  # alias
         'payment_zarinpal': ZarinpalPaymentAdapter(),
         'zarinpal': ZarinpalPaymentAdapter(),  # alias
         'shipping_irpost': IranPostShippingAdapter(),
@@ -1228,17 +1725,21 @@ class IntegrationRegistry:
         'ai_provider': GoogleGeminiAIAdapter(),
         'ai_gemini': GoogleGeminiAIAdapter(),  # alias
         'email_smtp': SMTPEmailAdapter(),
+        'ecommerce_woocommerce': WooCommerceIntegrationAdapter(),
+        'woocommerce': WooCommerceIntegrationAdapter(),  # alias
     }
 
     # Canonical list for UI management center (no duplicates)
     _canonical_ids: List[str] = [
         'sms_kavenegar',
         'social_instagram',
+        'social_telegram',
         'payment_zarinpal',
         'shipping_irpost',
         'shipping_tipax',
         'ai_gemini',
         'email_smtp',
+        'ecommerce_woocommerce',
     ]
 
     @classmethod

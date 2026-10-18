@@ -10,9 +10,10 @@ class ChatMessageSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'thread', 'sender_type', 'sender_type_display',
             'sender_name', 'text', 'media_url', 'is_ai_generated',
-            'was_edited_by_human', 'created_at'
+            'was_edited_by_human', 'delivery_status', 'external_message_id',
+            'error_message', 'created_at'
         ]
-        read_only_fields = ['id', 'created_at']
+        read_only_fields = ['id', 'created_at', 'delivery_status', 'external_message_id', 'error_message']
 
 
 class ConversationThreadSerializer(serializers.ModelSerializer):

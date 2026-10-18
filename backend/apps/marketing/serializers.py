@@ -115,3 +115,27 @@ class CampaignAttributionSerializer(serializers.ModelSerializer):
             'created_at'
         ]
         read_only_fields = ['id', 'created_at']
+
+
+from .models import MarketingCampaign
+
+
+class MarketingCampaignSerializer(serializers.ModelSerializer):
+    channel_display = serializers.CharField(source='get_channel_display', read_only=True)
+    status_display = serializers.CharField(source='get_status_display', read_only=True)
+
+    class Meta:
+        model = MarketingCampaign
+        fields = [
+            'id', 'name', 'target_segment', 'channel', 'channel_display',
+            'message_template', 'status', 'status_display',
+            'recipient_count', 'sent_count', 'delivered_count', 'failed_count',
+            'attributed_revenue', 'attributed_orders_count',
+            'scheduled_at', 'sent_at', 'created_at'
+        ]
+        read_only_fields = [
+            'id', 'status_display', 'recipient_count', 'sent_count',
+            'delivered_count', 'failed_count', 'attributed_revenue',
+            'attributed_orders_count', 'sent_at', 'created_at'
+        ]
+

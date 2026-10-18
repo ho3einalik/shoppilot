@@ -223,6 +223,16 @@ class SocialContentViewSet(viewsets.ModelViewSet):
         )
         return Response(ContentMetricSnapshotSerializer(snapshot).data, status=status.HTTP_201_CREATED)
 
+    @action(detail=True, methods=['post'], url_path='sync-live-metrics')
+    def sync_live_metrics(self, request, pk=None):
+        content = self.get_object()
+        membership = getattr(request, 'membership', None)
+        if not user_has_store_permission(membership, 'analytics.view'):
+            raise PermissionDenied("دسترسی مشاهده و دریافت آمار شبکه‌های اجتماعی را ندارید.")
+
+        result = SocialService.sync_live_metrics(content=content, user=request.user)
+        return Response(result)
+
     @action(detail=True, methods=['post'], url_path='submit-proof')
     def submit_proof(self, request, pk=None):
         content = self.get_object()

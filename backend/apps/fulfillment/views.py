@@ -73,12 +73,31 @@ class ShipmentViewSet(viewsets.ModelViewSet):
         dest_city = request.data.get('dest_city', 'تهران')
 
         adapter = get_carrier_adapter(carrier)
-        cost = adapter.estimate_shipping_cost(weight_grams, origin_city, dest_city)
+        quote = adapter.estimate_shipping_cost(weight_grams, origin_city, dest_city, store=request.store)
+        if isinstance(quote, dict):
+            return Response({
+                'carrier': carrier,
+                'estimated_cost': str(quote.get('total_cost', '0')),
+                'total_cost': str(quote.get('total_cost', '0')),
+                'is_live_quote': quote.get('is_live_quote', False),
+                'quote_type': quote.get('quote_type', 'TARIFF_ESTIMATE'),
+                'breakdown': {k: str(v) for k, v in quote.get('breakdown', {}).items()},
+                'notes': quote.get('notes', ''),
+                'currency': request.store.currency
+            })
         return Response({
             'carrier': carrier,
-            'estimated_cost': str(cost),
+            'estimated_cost': str(quote),
             'currency': request.store.currency
         })
+
+    @action(detail=True, methods=['get', 'post'], url_path='query-live-tracking')
+    def query_live_tracking(self, request, pk=None):
+        shipment = self.get_object()
+        adapter = get_carrier_adapter(shipment.carrier)
+        tracking_result = adapter.query_live_tracking(shipment, store=request.store)
+        return Response(tracking_result)
+
 
     @action(detail=True, methods=['get'], url_path='packing-slip')
     def packing_slip(self, request, pk=None):

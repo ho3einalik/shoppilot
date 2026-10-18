@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from .models import Supplier, PurchaseOrder, PurchaseOrderItem
+from .models import Supplier, PurchaseOrder, PurchaseOrderItem, GoodsReceiptInspection
 from apps.catalog.serializers import ProductVariantSerializer
 
 class SupplierSerializer(serializers.ModelSerializer):
@@ -29,11 +29,27 @@ class PurchaseOrderItemSerializer(serializers.ModelSerializer):
         read_only_fields = ['id', 'total_cost', 'quantity_received']
 
 
+class GoodsReceiptInspectionSerializer(serializers.ModelSerializer):
+    variant_sku = serializers.CharField(source='variant.sku', read_only=True)
+    rejection_reason_display = serializers.CharField(source='get_rejection_reason_display', read_only=True)
+
+    class Meta:
+        model = GoodsReceiptInspection
+        fields = [
+            'id', 'variant', 'variant_sku', 'quantity_received',
+            'quantity_accepted', 'quantity_rejected', 'rejection_reason',
+            'rejection_reason_display', 'inspection_notes',
+            'inspected_by', 'inspected_at'
+        ]
+        read_only_fields = ['id', 'inspected_at']
+
+
 class PurchaseOrderSerializer(serializers.ModelSerializer):
     supplier_name = serializers.CharField(source='supplier.name', read_only=True)
     warehouse_name = serializers.CharField(source='warehouse.name', read_only=True)
     status_display = serializers.CharField(source='get_status_display', read_only=True)
     items = PurchaseOrderItemSerializer(many=True, read_only=True)
+    inspections = GoodsReceiptInspectionSerializer(many=True, read_only=True)
 
     class Meta:
         model = PurchaseOrder
@@ -41,6 +57,7 @@ class PurchaseOrderSerializer(serializers.ModelSerializer):
             'id', 'po_number', 'supplier', 'supplier_name',
             'warehouse', 'warehouse_name', 'status', 'status_display',
             'currency', 'total_amount', 'expected_delivery_date',
-            'notes', 'items', 'created_at', 'updated_at'
+            'notes', 'items', 'inspections', 'created_at', 'updated_at'
         ]
         read_only_fields = ['id', 'po_number', 'total_amount', 'status', 'created_at', 'updated_at']
+

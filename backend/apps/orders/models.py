@@ -108,3 +108,33 @@ class OrderItem(models.Model):
 
     def __str__(self):
         return f"{self.quantity} x {self.variant_sku} in {self.order.order_number}"
+
+
+class SyncType(models.TextChoices):
+    PRODUCTS = 'PRODUCTS', 'همگام‌سازی محصولات'
+    ORDERS = 'ORDERS', 'همگام‌سازی سفارشات'
+    INVENTORY = 'INVENTORY', 'همگام‌سازی موجودی'
+    WEBHOOK = 'WEBHOOK', 'رویداد وب‌هوک'
+
+
+class SyncStatus(models.TextChoices):
+    SUCCESS = 'SUCCESS', 'موفق'
+    PARTIAL = 'PARTIAL', 'ناقص'
+    FAILED = 'FAILED', 'ناموفق'
+
+
+class WooCommerceSyncLog(TenantScopedModel):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    sync_type = models.CharField(max_length=30, choices=SyncType.choices, verbose_name="نوع همگام‌سازی")
+    status = models.CharField(max_length=20, choices=SyncStatus.choices, default=SyncStatus.SUCCESS, verbose_name="وضعیت")
+    items_synced = models.PositiveIntegerField(default=0, verbose_name="تعداد رکوردهای همگام‌شده")
+    error_details = models.TextField(blank=True, verbose_name="جزئیات خطاهای همگام‌سازی")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = 'گزارش همگام‌سازی ووکامرس'
+        verbose_name_plural = 'گزارش‌های همگام‌سازی ووکامرس'
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"{self.get_sync_type_display()} - {self.get_status_display()} ({self.items_synced} مورد)"

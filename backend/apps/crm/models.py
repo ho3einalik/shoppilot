@@ -44,6 +44,9 @@ class CustomerProfile(TenantScopedModel):
     instagram_handle = models.CharField(max_length=100, blank=True, verbose_name="آیدی اینستاگرام")
     telegram_handle = models.CharField(max_length=100, blank=True, verbose_name="آیدی تلگرام")
     
+    refunds_deducted = models.DecimalField(max_digits=14, decimal_places=0, default=Decimal('0'), verbose_name="مجموع مبالغ مرجوعی کسرشده")
+    segment_reason = models.CharField(max_length=255, blank=True, verbose_name="علت بخش‌بندی RFM")
+    last_calculated_at = models.DateTimeField(null=True, blank=True, verbose_name="زمان آخرین محاسبه RFM")
     last_interaction_at = models.DateTimeField(null=True, blank=True, verbose_name="زمان آخرین تعامل")
 
     class Meta:

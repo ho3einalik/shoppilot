@@ -100,9 +100,20 @@ def mark_purchase_order_sent(po, user=None):
 @transaction.atomic
 def receive_po_goods(po, receipts_data, user=None):
     """
-    Receive items into inventory warehouse and record Accounts Payable liability.
-    receipts_data format: [{'item_id': uuid, 'quantity_received': int}]
+    Receive items into inventory warehouse with QC inspection and record Accounts Payable liability.
+    receipts_data format: [
+        {
+            'item_id': uuid,
+            'quantity_received': int,
+            'quantity_accepted': int (optional, defaults to quantity_received - quantity_rejected),
+            'quantity_rejected': int (optional, defaults to 0),
+            'rejection_reason': str (optional),
+            'inspection_notes': str (optional)
+        }
+    ]
     """
+    from .models import GoodsReceiptInspection
+
     po = PurchaseOrder.objects.select_for_update().get(id=po.id)
     if po.status in [PurchaseOrderStatus.DRAFT, PurchaseOrderStatus.CANCELLED, PurchaseOrderStatus.COMPLETED]:
         raise ValidationError(f"امکان رسید کالا برای این سفارش وجود ندارد (وضعیت: {po.get_status_display()})")
@@ -114,41 +125,72 @@ def receive_po_goods(po, receipts_data, user=None):
     for receipt in receipts_data:
         item_id = str(receipt.get('item_id', ''))
         try:
-            qty_to_receive = int(receipt.get('quantity_received', 0))
+            qty_received = int(receipt.get('quantity_received', 0))
         except (ValueError, TypeError):
-            continue
-
-        if qty_to_receive <= 0:
             continue
 
         item = items_dict.get(item_id)
         if not item:
             raise ValidationError(f"ردیف کالای انتخابی {item_id} در این سفارش خرید یافت نشد.")
 
-        if qty_to_receive > item.remaining_quantity:
+        qty_rejected = int(receipt.get('quantity_rejected', 0))
+        if 'quantity_accepted' in receipt:
+            qty_accepted = int(receipt.get('quantity_accepted', 0))
+            if qty_received <= 0:
+                qty_received = qty_accepted + qty_rejected
+        else:
+            qty_accepted = max(0, qty_received - qty_rejected)
+
+        if qty_received <= 0:
+            continue
+
+        if qty_accepted + qty_rejected > qty_received:
             raise ValidationError(
-                f"تعداد ورودی ({qty_to_receive}) برای {item.variant.sku} نمی‌تواند بیشتر از مانده سفارش ({item.remaining_quantity}) باشد."
+                f"مجموع اقلام تاییدشده ({qty_accepted}) و مردود ({qty_rejected}) نمی‌تواند از کل اقلام دریافتی ({qty_received}) بیشتر باشد."
             )
 
-        # Receive into inventory ledger
-        receive_stock(
+        if qty_received > item.remaining_quantity:
+            raise ValidationError(
+                f"تعداد ورودی ({qty_received}) برای {item.variant.sku} نمی‌تواند بیشتر از مانده سفارش ({item.remaining_quantity}) باشد."
+            )
+
+        rejection_reason = receipt.get('rejection_reason', '')
+        inspection_notes = receipt.get('inspection_notes', '')
+
+        # 1. Save Quality Control / Goods Receipt Inspection record
+        GoodsReceiptInspection.objects.create(
             store=po.store,
-            warehouse=po.warehouse,
+            purchase_order=po,
             variant=item.variant,
-            quantity=qty_to_receive,
-            unit_cost=item.unit_cost,
-            reference=po.po_number,
-            reason=f"رسید انبار از سفارش خرید {po.po_number}",
-            user=user
+            quantity_received=qty_received,
+            quantity_accepted=qty_accepted,
+            quantity_rejected=qty_rejected,
+            rejection_reason=rejection_reason,
+            inspection_notes=inspection_notes,
+            inspected_by=user
         )
 
-        item.quantity_received += qty_to_receive
+        # 2. ONLY quantity_accepted enters active warehouse inventory via receive_stock
+        if qty_accepted > 0:
+            receive_stock(
+                store=po.store,
+                warehouse=po.warehouse,
+                variant=item.variant,
+                quantity=qty_accepted,
+                unit_cost=item.unit_cost,
+                reference=po.po_number,
+                reason=f"رسید انبار پس از بازرسی کیفیت از سفارش خرید {po.po_number}",
+                user=user
+            )
+
+        item.quantity_received += qty_received
         item.save(update_fields=['quantity_received'])
-        total_batch_cost += item.unit_cost * qty_to_receive
+        total_batch_cost += item.unit_cost * qty_accepted
         received_anything = True
 
     if not received_anything:
         raise ValidationError("هیچ کالایی با تعداد معتبر جهت تحویل و رسید انبار مشخص نشده است.")
+
 
     # Check overall PO completion status
     all_completed = all(i.is_fully_received for i in po.items.all())

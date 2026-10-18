@@ -119,3 +119,101 @@ class ConversationThreadViewSet(viewsets.ModelViewSet):
             thread.save(update_fields=fields_to_update)
 
         return Response(ConversationThreadSerializer(thread).data)
+
+
+import os
+from rest_framework.views import APIView
+from django.http import HttpResponse
+from .models import ThreadChannel
+from .services import receive_incoming_message
+from apps.tenancy.models import Store
+from apps.features.adapters import get_integration_adapter
+
+
+class InstagramWebhookView(APIView):
+    permission_classes = [permissions.AllowAny]
+
+    def get(self, request):
+        """Meta Webhook Verification (hub.challenge)"""
+        mode = request.query_params.get('hub.mode')
+        token = request.query_params.get('hub.verify_token')
+        challenge = request.query_params.get('hub.challenge')
+
+        expected_token = os.environ.get('INSTAGRAM_WEBHOOK_VERIFY_TOKEN', 'shoppilot_meta_webhook_secret')
+        if mode == 'subscribe' and token == expected_token:
+            return HttpResponse(challenge, content_type='text/plain')
+        return Response({'error': 'Verification failed'}, status=status.HTTP_403_FORBIDDEN)
+
+    def post(self, request):
+        """Processes incoming Instagram messaging events from Meta"""
+        data = request.data
+        if data.get('object') == 'instagram':
+            for entry in data.get('entry', []):
+                ig_account_id = entry.get('id')
+                from apps.features.models import StoreIntegrationConfig
+                config = StoreIntegrationConfig.objects.filter(
+                    integration_id__in=['social_instagram', 'instagram'],
+                    is_active=True
+                ).select_related('store').first()
+
+                store = config.store if config else None
+                if not store:
+                    continue
+
+                for messaging_event in entry.get('messaging', []):
+                    sender_id = messaging_event.get('sender', {}).get('id')
+                    message = messaging_event.get('message', {})
+                    text = message.get('text', '')
+                    msg_id = message.get('mid')
+                    if text and sender_id != ig_account_id:
+                        receive_incoming_message(
+                            store=store,
+                            channel=ThreadChannel.INSTAGRAM_DM,
+                            sender_id=str(sender_id),
+                            sender_name=f"کاربر اینستاگرام {str(sender_id)[-4:]}",
+                            text=text,
+                            external_message_id=msg_id
+                        )
+
+            return Response({'status': 'EVENT_RECEIVED'}, status=status.HTTP_200_OK)
+        return Response({'status': 'IGNORED'}, status=status.HTTP_200_OK)
+
+
+class TelegramWebhookView(APIView):
+    permission_classes = [permissions.AllowAny]
+
+    def post(self, request, store_id):
+        """Processes incoming updates from Telegram Bot Webhook"""
+        store = Store.objects.filter(id=store_id, is_active=True).first()
+        if not store:
+            return Response({'error': 'فروشگاه یافت نشد.'}, status=status.HTTP_404_NOT_FOUND)
+
+        secret_header = request.headers.get('X-Telegram-Bot-Api-Secret-Token', '')
+        tg_adapter = get_integration_adapter('social_telegram')
+        if tg_adapter:
+            conf = tg_adapter.get_config(store, decrypted=True)
+            expected_secret = conf.get('webhook_secret')
+            if expected_secret and secret_header != expected_secret:
+                return Response({'error': 'Invalid secret token'}, status=status.HTTP_403_FORBIDDEN)
+
+        update = request.data
+        message = update.get('message') or update.get('channel_post')
+        if message:
+            sender = message.get('from', {})
+            chat = message.get('chat', {})
+            chat_id = str(chat.get('id'))
+            text = message.get('text', '')
+            msg_id = f"tg_{message.get('message_id')}"
+            sender_name = sender.get('first_name', '') or sender.get('username', '') or chat.get('title', '')
+
+            if text:
+                receive_incoming_message(
+                    store=store,
+                    channel=ThreadChannel.TELEGRAM,
+                    sender_id=chat_id,
+                    sender_name=sender_name,
+                    text=text,
+                    external_message_id=msg_id
+                )
+
+        return Response({'status': 'OK'}, status=status.HTTP_200_OK)

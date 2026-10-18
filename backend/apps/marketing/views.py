@@ -332,3 +332,29 @@ class CampaignAttributionViewSet(viewsets.ReadOnlyModelViewSet):
         if not store:
             return CampaignAttribution.objects.none()
         return CampaignAttribution.objects.filter(order__store=store).select_related('order', 'campaign')
+
+
+from .models import MarketingCampaign
+from .serializers import MarketingCampaignSerializer
+from .services import dispatch_marketing_campaign
+
+
+class MarketingCampaignViewSet(viewsets.ModelViewSet):
+    serializer_class = MarketingCampaignSerializer
+    permission_classes = [permissions.IsAuthenticated, IsStoreMemberPermission]
+
+    def get_queryset(self):
+        store = getattr(self.request, 'store', None)
+        if not store:
+            return MarketingCampaign.objects.none()
+        return MarketingCampaign.objects.filter(store=store)
+
+    def perform_create(self, serializer):
+        serializer.save(store=self.request.store, created_by=self.request.user)
+
+    @action(detail=True, methods=['post'], url_path='dispatch', permission_classes=[permissions.IsAuthenticated, IsStoreAdminOrOwnerPermission])
+    def dispatch_campaign(self, request, pk=None):
+        campaign = self.get_object()
+        result = dispatch_marketing_campaign(campaign, user=request.user)
+        return Response(result, status=status.HTTP_200_OK)
+

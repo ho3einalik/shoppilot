@@ -30,7 +30,8 @@ import {
   X,
   SlidersHorizontal,
   HelpCircle,
-  Sparkles
+  Sparkles,
+  Globe
 } from 'lucide-react';
 import { api } from '@/lib/api';
 
@@ -73,7 +74,9 @@ const CATEGORIES = [
   { id: 'SHIPPING', label: 'حمل‌ونقل و رهگیری', icon: Truck },
   { id: 'EMAIL', label: 'ایمیل و مکاتبات', icon: Mail },
   { id: 'AI', label: 'هوش مصنوعی', icon: Bot },
+  { id: 'SALES_CHANNEL', label: 'کانال‌های فروش و وب‌سایت', icon: Globe },
 ];
+
 
 export default function IntegrationsManagementPage() {
   const [integrations, setIntegrations] = useState<IntegrationItem[]>([]);

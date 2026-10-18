@@ -79,6 +79,19 @@ class ChatMessage(models.Model):
     media_url = models.CharField(max_length=500, blank=True, verbose_name="لینک فایل یا تصویر ضمیمه")
     is_ai_generated = models.BooleanField(default=False, verbose_name="پیشنهاد هوش مصنوعی")
     was_edited_by_human = models.BooleanField(default=False, verbose_name="ویرایش شده توسط کاربر قبل از ارسال")
+    external_message_id = models.CharField(max_length=150, blank=True, db_index=True, verbose_name="شناسه پیام در پلتفرم خارجی")
+    delivery_status = models.CharField(
+        max_length=30,
+        default='SENT',
+        choices=[
+            ('SENT', 'ارسال شده'),
+            ('DELIVERED', 'تحویل شده'),
+            ('FAILED', 'خطا در ارسال'),
+            ('LOCAL_ONLY', 'ذخیره محلی (آفلاین)')
+        ],
+        verbose_name="وضعیت تحویل"
+    )
+    error_message = models.TextField(blank=True, verbose_name="متن خطای ارسال خارجی")
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:

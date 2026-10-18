@@ -108,8 +108,8 @@ class SocialService:
 
     @staticmethod
     def dispatch_direct_api_publish(content, user=None):
-        from .models import PublishingMode
-        import uuid
+        from .models import PublishingMode, SocialPlatform
+        from apps.features.adapters import get_integration_adapter
 
         if content.publishing_mode != PublishingMode.DIRECT_API:
             raise ValidationError("این محتوا برای انتشار مستقیم API تنظیم نشده است.")
@@ -118,20 +118,63 @@ class SocialService:
             raise ValidationError("اکانت شبکه اجتماعی مربوطه متصل نیست یا کلید دسترسی معتبر ندارد.")
 
         platform = content.account.platform
-        external_id = f"srv-{platform.lower()}-{uuid.uuid4().hex[:12]}"
-        pub_url = f"https://{platform.lower()}.com/p/{uuid.uuid4().hex[:10]}"
-
-        api_response = {
-            'status': 'SUCCESS',
-            'external_post_id': external_id,
-            'published_url': pub_url
-        }
+        if platform == SocialPlatform.INSTAGRAM:
+            adapter = get_integration_adapter('social_instagram')
+            if not adapter:
+                raise ValidationError("آداپتور اینستاگرام در سیستم یافت نشد.")
+            api_response = adapter.publish_content_to_instagram(store=content.store, content=content)
+        elif platform == SocialPlatform.TELEGRAM:
+            adapter = get_integration_adapter('social_telegram')
+            if not adapter:
+                raise ValidationError("آداپتور تلگرام در سیستم یافت نشد.")
+            api_response = adapter.publish_content_to_telegram(store=content.store, content=content)
+        else:
+            raise ValidationError(f"انتشار مستقیم API برای پلتفرم {platform} در حال حاضر پشتیبانی نمی‌شود.")
 
         return SocialService.publish_content(
             content=content,
             user=user,
             direct_api_response=api_response
         )
+
+    @staticmethod
+    def sync_live_metrics(content, user=None):
+        from .models import SocialPlatform, MetricSource
+        from apps.features.adapters import get_integration_adapter
+
+        if not content.external_post_id:
+            raise ValidationError("این پست فاقد شناسه رسمی پلتفرم خارجی جهت استعلام آمار است.")
+
+        if not content.account:
+            raise ValidationError("اکانت متصل به این محتوا مشخص نشده است.")
+
+        if content.account.platform == SocialPlatform.INSTAGRAM:
+            adapter = get_integration_adapter('social_instagram')
+            res = adapter.fetch_live_metrics(store=content.store, external_post_id=content.external_post_id)
+            if not res.get('is_live'):
+                return {'is_live': False, 'message': res.get('message', 'آمار زنده در دسترس نیست.')}
+
+            snapshot = ContentMetricSnapshot.objects.create(
+                content=content,
+                source=MetricSource.API_SYNC,
+                recorded_by=user,
+                reach=res.get('reach', 0),
+                impressions=res.get('impressions', res.get('reach', 0)),
+                saves=res.get('saves', 0),
+                likes=res.get('likes', 0),
+                comments=res.get('comments', 0),
+                shares=res.get('shares', 0)
+            )
+            return {
+                'is_live': True,
+                'snapshot_id': str(snapshot.id),
+                'reach': snapshot.reach,
+                'impressions': snapshot.impressions,
+                'saves': snapshot.saves,
+                'engagement': res.get('engagement', 0)
+            }
+        else:
+            return {'is_live': False, 'message': 'استعلام آمار زنده برای این پلتفرم پشتیبانی نمی‌شود.'}
 
     @staticmethod
     def submit_proof(content, proof_url='', proof_image_url='', user=None):
