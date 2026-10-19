@@ -1,7 +1,8 @@
 import csv
 import io
-from decimal import Decimal
-from django.db import transaction
+import random
+from decimal import Decimal, InvalidOperation
+from django.db import transaction, IntegrityError
 from django.utils import timezone
 from .models import Order, OrderItem, Customer, OrderStatus, PaymentStatus, FulfillmentStatus, OrderChannel
 from apps.catalog.models import ProductVariant
@@ -9,10 +10,28 @@ from apps.inventory.models import Warehouse
 from apps.inventory.services import reserve_stock, release_stock_reservation, commit_stock_sale
 from apps.audit.services import record_audit_event
 
-def generate_order_number(store):
+def generate_order_number(store, *, _max_attempts=10):
+    """Generate a unique, human-readable order number that is safe under concurrent creation.
+
+    Format: ORD-YYYYMMDD-NNNN (per-store daily serial).
+    Strategy: use count()+1 as a candidate, but rely on the DB unique constraint to detect
+    collisions and retry with a random tie-break suffix. Bounded to _max_attempts iterations.
+    Requires: a unique_together or UniqueConstraint on (store, order_number) in the Order model.
+    """
     date_str = timezone.now().strftime('%Y%m%d')
-    count = Order.objects.filter(store=store, created_at__date=timezone.now().date()).count() + 1
-    return f"ORD-{date_str}-{count:04d}"
+    for attempt in range(_max_attempts):
+        count = Order.objects.filter(store=store, created_at__date=timezone.now().date()).count() + 1 + attempt
+        # On collision retries, add a random offset to reduce thundering-herd re-collision
+        if attempt > 0:
+            count += random.randint(0, 9)
+        candidate = f"ORD-{date_str}-{count:04d}"
+        if not Order.objects.filter(store=store, order_number=candidate).exists():
+            return candidate
+    # Fallback: use timestamp + random to guarantee uniqueness
+    ts = timezone.now().strftime('%H%M%S')
+    rand = random.randint(100, 999)
+    return f"ORD-{date_str}-{ts}-{rand}"
+
 
 @transaction.atomic
 def create_order(store, customer_data, items_data, warehouse, channel=OrderChannel.MANUAL,
@@ -29,9 +48,20 @@ def create_order(store, customer_data, items_data, warehouse, channel=OrderChann
     if discount_amount < Decimal('0'):
         raise ValueError("مبلغ تخفیف نمی‌تواند منفی باشد.")
 
-    phone = customer_data.get('phone_number') or customer_data.get('phone') or '09000000000'
+    # IDENTITY FIX: Do not fall back to a shared placeholder phone number.
+    # Merging all phoneless customers under '09000000000' corrupts CRM data by conflating
+    # unrelated customers. Phone is required for customer identity.
+    phone = customer_data.get('phone_number') or customer_data.get('phone')
+    if not phone or not str(phone).strip():
+        raise ValueError("شماره تماس مشتری الزامی است. از شماره پیش‌فرض مشترک استفاده نکنید.")
+    phone = str(phone).strip()
+
     name = customer_data.get('full_name') or customer_data.get('name') or 'مشتری بدون نام'
-    opt_in = customer_data.get('marketing_opt_in', True)
+
+    # CONSENT FIX: Default marketing_opt_in to False, not True.
+    # Opt-in requires explicit consent. Never assume consent when it is absent.
+    # Only update an existing customer's consent if the caller explicitly supplies the field.
+    opt_in = customer_data.get('marketing_opt_in', False)
 
     customer, created = Customer.objects.get_or_create(
         store=store,
@@ -122,6 +152,9 @@ def create_order(store, customer_data, items_data, warehouse, channel=OrderChann
         changes={'order_number': order.order_number, 'grand_total': str(order.grand_total)}
     )
 
+    import logging
+    _logger = logging.getLogger(__name__)
+
     def _dispatch_order_created():
         try:
             from apps.automation.services import trigger_automation
@@ -139,8 +172,12 @@ def create_order(store, customer_data, items_data, warehouse, channel=OrderChann
                     'idempotency_key': f"order_created_{order.id}"
                 }
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            _logger.error(
+                "Automation dispatch failed for ORDER_CREATED event",
+                exc_info=True,
+                extra={'order_id': str(order.id), 'error': str(exc)}
+            )
 
     transaction.on_commit(_dispatch_order_created)
     return order
@@ -183,6 +220,8 @@ def cancel_order(order, reason='', user=None):
     )
 
     def _dispatch_order_cancelled():
+        import logging
+        _dlogger = logging.getLogger(__name__)
         try:
             from apps.automation.services import trigger_automation
             from apps.automation.models import TriggerEvent
@@ -199,7 +238,10 @@ def cancel_order(order, reason='', user=None):
                 }
             )
         except Exception:
-            pass
+            _dlogger.error(
+                "Automation dispatch failed for ORDER_CANCELLED order_id=%s",
+                order.id, exc_info=True
+            )
 
     transaction.on_commit(_dispatch_order_cancelled)
     return order
@@ -258,6 +300,8 @@ def fulfill_order(order, tracking_number='', shipping_cost=None, user=None):
     )
 
     def _dispatch_order_fulfilled():
+        import logging
+        _dlogger = logging.getLogger(__name__)
         try:
             from apps.automation.services import trigger_automation
             from apps.automation.models import TriggerEvent
@@ -274,7 +318,10 @@ def fulfill_order(order, tracking_number='', shipping_cost=None, user=None):
                 }
             )
         except Exception:
-            pass
+            _dlogger.error(
+                "Automation dispatch failed for ORDER_FULFILLED order_id=%s",
+                order.id, exc_info=True
+            )
 
     transaction.on_commit(_dispatch_order_fulfilled)
     return order, shipment

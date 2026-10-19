@@ -97,32 +97,24 @@ class IranPostAdapter(CarrierAdapter):
                 'message': 'کلید وب‌سرویس پستی در تنظیمات فروشگاه وارد نشده است. رهگیری از طریق درگاه رسمی شرکت ملی پست انجام می‌شود.'
             }
 
-        # If API key is present, attempt live request; if carrier sandbox/portal unavailable, fail gracefully without fake status
-        try:
-            # Official Post tracking endpoint check
-            return {
-                'is_live': True,
-                'status': shipment.status,
-                'status_display': shipment.get_status_display(),
-                'tracking_number': shipment.tracking_number,
-                'tracking_url': tracking_url,
-                'mode': 'LIVE_API',
-                'carrier': Carrier.IRPOST,
-                'carrier_display': 'شرکت ملی پست',
-                'message': 'اطلاعات رهگیری مستقیم از وب‌سرویس پست استعلام گردید.'
-            }
-        except Exception as e:
-            return {
-                'is_live': False,
-                'status': shipment.status,
-                'status_display': shipment.get_status_display(),
-                'tracking_number': shipment.tracking_number,
-                'tracking_url': tracking_url,
-                'mode': 'LIVE_QUERY_ERROR',
-                'carrier': Carrier.IRPOST,
-                'carrier_display': 'شرکت ملی پست',
-                'message': f'خطا در ارتباط با وب‌سرویس پست: {str(e)}'
-            }
+        # TRACKING FIX: An API key alone does NOT mean a live query succeeded.
+        # The previous code falsely returned is_live=True without making any actual HTTP request.
+        # Until a real Iran Post webservice integration is implemented, explicitly mark as
+        # NOT_IMPLEMENTED to avoid fabricating live tracking status.
+        # When a real endpoint is available, replace this block with an actual HTTP call,
+        # validate the HTTP status, response schema, and provider error codes before setting is_live=True.
+        return {
+            'is_live': False,
+            'status': shipment.status,
+            'status_display': shipment.get_status_display(),
+            'tracking_number': shipment.tracking_number,
+            'tracking_url': tracking_url,
+            'mode': 'API_NOT_IMPLEMENTED',
+            'carrier': Carrier.IRPOST,
+            'carrier_display': 'شرکت ملی پست',
+            'message': 'وب‌سرویس رهگیری شرکت ملی پست هنوز پیاده‌سازی نشده است. رهگیری از طریق لینک درگاه عمومی انجام می‌شود.'
+        }
+
 
 
 class TipaxAdapter(CarrierAdapter):
@@ -178,16 +170,17 @@ class TipaxAdapter(CarrierAdapter):
             }
 
         return {
-            'is_live': True,
+            'is_live': False,
             'status': shipment.status,
             'status_display': shipment.get_status_display(),
             'tracking_number': shipment.tracking_number,
             'tracking_url': tracking_url,
-            'mode': 'LIVE_API',
+            'mode': 'API_NOT_IMPLEMENTED',
             'carrier': Carrier.TIPAX,
             'carrier_display': 'تیپاکس',
-            'message': 'اطلاعات رهگیری مستقیم از سامانه تیپاکس استعلام شد.'
+            'message': 'وب‌سرویس رهگیری تیپاکس هنوز پیاده‌سازی نشده است. رهگیری از طریق لینک درگاه عمومی تیپاکس انجام می‌شود.'
         }
+
 
 
 class SnappBoxAdapter(CarrierAdapter):

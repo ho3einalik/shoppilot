@@ -52,8 +52,8 @@ def dispatch_marketing_campaign(campaign: MarketingCampaign, user=None) -> dict:
     campaign.recipient_count = len(customers)
     campaign.save(update_fields=['status', 'recipient_count'])
 
-    sent_count = 0
-    delivered_count = 0
+    sent_count = 0       # Successfully dispatched to provider (SENT state from provider)
+    delivered_count = 0  # Provider explicitly confirmed delivery (DELIVERED state)
     failed_count = 0
 
     if campaign.channel == CampaignChannel.SMS:
@@ -70,9 +70,15 @@ def dispatch_marketing_campaign(campaign: MarketingCampaign, user=None) -> dict:
             text = campaign.message_template.replace('{name}', cust.full_name or 'مشتری گرامی')
             try:
                 res = adapter.send_sms(store=store, receptor=cust.phone_number, message=text)
-                if res.get('status') in ('DELIVERED', 'SENT'):
+                provider_status = res.get('status', '').upper()
+                # SENT and DELIVERED are distinct states — do not conflate them.
+                # SENT means the provider accepted the message; DELIVERED means confirmed receipt.
+                if provider_status == 'DELIVERED':
                     sent_count += 1
                     delivered_count += 1
+                elif provider_status == 'SENT':
+                    sent_count += 1
+                    # delivered_count is NOT incremented — we don't have delivery confirmation yet
                 else:
                     failed_count += 1
             except Exception:
@@ -92,15 +98,28 @@ def dispatch_marketing_campaign(campaign: MarketingCampaign, user=None) -> dict:
             text = campaign.message_template.replace('{name}', cust.full_name or 'مشتری گرامی')
             try:
                 res = adapter.send_email(store=store, to_email=cust.email, subject=campaign.name, body_html=f"<p>{text}</p>")
-                if res.get('status') in ('DELIVERED', 'SENT'):
+                provider_status = res.get('status', '').upper()
+                if provider_status == 'DELIVERED':
                     sent_count += 1
                     delivered_count += 1
+                elif provider_status == 'SENT':
+                    sent_count += 1
                 else:
                     failed_count += 1
             except Exception:
                 failed_count += 1
 
-    campaign.status = CampaignStatus.SENT
+    # STATUS FIX: A campaign with all recipients failed must NOT be marked SENT.
+    # CampaignStatus has: DRAFT, SCHEDULED, SENDING, SENT, CANCELLED.
+    # Use CANCELLED when zero recipients were successfully dispatched.
+    # Use SENT when at least one message was dispatched (even if partially failed).
+    total = len(customers)
+    if total == 0 or sent_count == 0:
+        final_status = CampaignStatus.CANCELLED  # No successful sends — do not claim SENT
+    else:
+        final_status = CampaignStatus.SENT
+
+    campaign.status = final_status
     campaign.sent_count = sent_count
     campaign.delivered_count = delivered_count
     campaign.failed_count = failed_count
@@ -108,7 +127,7 @@ def dispatch_marketing_campaign(campaign: MarketingCampaign, user=None) -> dict:
     campaign.save(update_fields=['status', 'sent_count', 'delivered_count', 'failed_count', 'sent_at'])
 
     return {
-        'status': 'SUCCESS',
+        'status': 'SUCCESS' if sent_count > 0 else 'FAILED',
         'campaign_id': str(campaign.id),
         'recipients': len(customers),
         'sent_count': sent_count,

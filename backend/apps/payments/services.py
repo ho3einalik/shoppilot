@@ -48,6 +48,9 @@ def verify_payment_transaction(payment, user):
     )
 
     if order.payment_status == PaymentStatus.PAID:
+        import logging
+        _logger = logging.getLogger(__name__)
+
         def _dispatch_order_paid():
             try:
                 from apps.automation.services import trigger_automation
@@ -64,8 +67,14 @@ def verify_payment_transaction(payment, user):
                         'idempotency_key': f"order_paid_{order.id}"
                     }
                 )
-            except Exception:
-                pass
+            except Exception as exc:
+                # Log structured error — do not silently swallow. Automation failures
+                # should be visible and recoverable, not masked by a bare pass.
+                _logger.error(
+                    "Automation dispatch failed for ORDER_PAID event",
+                    exc_info=True,
+                    extra={'order_id': str(order.id), 'payment_id': str(payment.id), 'error': str(exc)}
+                )
 
         transaction.on_commit(_dispatch_order_paid)
 

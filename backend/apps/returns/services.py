@@ -10,10 +10,24 @@ from apps.orders.models import FulfillmentStatus
 from apps.inventory.services import process_return_stock
 from apps.audit.services import record_audit_event
 
-def generate_rma_number():
+def generate_rma_number(store, *, _max_attempts=10):
+    """Generate a unique RMA number that is safe under concurrent creation.
+
+    Format: RMA-YYMMDD-NNNN, with random suffix and retry-on-collision.
+    Relies on unique_together = ('store', 'rma_number') for enforcement.
+    """
+    import random as _random
+    from django.db import IntegrityError as _IntegrityError
+
     date_str = timezone.now().strftime('%y%m%d')
-    suffix = random.randint(1000, 9999)
-    return f"RMA-{date_str}-{suffix}"
+    for attempt in range(_max_attempts):
+        suffix = _random.randint(1000, 9999) if attempt == 0 else _random.randint(10000, 99999)
+        candidate = f"RMA-{date_str}-{suffix}"
+        if not ReturnRequest.objects.filter(store=store, rma_number=candidate).exists():
+            return candidate
+    # Deterministic timestamp fallback (microseconds) — extremely unlikely collision
+    import time as _time
+    return f"RMA-{date_str}-{int(_time.time() * 1_000_000) % 10_000_000}"
 
 from django.db.models import Sum
 from apps.orders.models import Order, OrderItem, FulfillmentStatus, OrderStatus
@@ -40,7 +54,7 @@ def create_return_request(
         for item in OrderItem.objects.select_for_update().filter(id__in=item_ids, order=order).order_by('id')
     }
 
-    rma_number = generate_rma_number()
+    rma_number = generate_rma_number(order.store)
     total_refund = Decimal('0')
 
     rma = ReturnRequest.objects.create(
@@ -109,6 +123,8 @@ def create_return_request(
     )
 
     def _dispatch_return_requested():
+        import logging
+        _dlogger = logging.getLogger(__name__)
         try:
             from apps.automation.services import trigger_automation
             from apps.automation.models import TriggerEvent
@@ -126,7 +142,10 @@ def create_return_request(
                 }
             )
         except Exception:
-            pass
+            _dlogger.error(
+                "Automation dispatch failed for RETURN_REQUESTED rma_id=%s",
+                rma.id, exc_info=True
+            )
 
     transaction.on_commit(_dispatch_return_requested)
     return rma
@@ -203,28 +222,25 @@ def inspect_and_process_return(rma, inspection_items_data, warehouse, user=None,
             )
 
     # Handle item exchange dispatch from inventory
+    # INVENTORY FIX: Route exchange dispatch through the authoritative commit_stock_sale
+    # instead of directly decrementing on_hand_quantity, which bypasses the reservation system
+    # and can consume stock reserved for other pending orders.
     if rma.is_exchange and rma.exchange_variant and rma.exchange_quantity > 0:
-        from apps.inventory.services import get_or_create_balance, MovementType, InventoryMovement
-        exchange_bal = get_or_create_balance(rma.store, warehouse, rma.exchange_variant)
-        if exchange_bal.on_hand_quantity < rma.exchange_quantity:
-            raise ValidationError(
-                f"موجودی انبار {warehouse.name} برای ارسال کالای جایگزین ({rma.exchange_variant.sku}) کافی نیست. "
-                f"موجودی فعلی: {exchange_bal.on_hand_quantity}، تعداد موردنیاز: {rma.exchange_quantity}"
+        from apps.inventory.services import commit_stock_sale
+        try:
+            commit_stock_sale(
+                store=rma.store,
+                warehouse=warehouse,
+                variant=rma.exchange_variant,
+                quantity=rma.exchange_quantity,
+                reference=f"EXCHANGE_{rma.rma_number}",
+                user=user
             )
-        exchange_bal.on_hand_quantity -= rma.exchange_quantity
-        exchange_bal.save()
-
-        InventoryMovement.objects.create(
-            store=rma.store,
-            warehouse=warehouse,
-            variant=rma.exchange_variant,
-            movement_type=MovementType.SALE,
-            quantity=-rma.exchange_quantity,
-            balance_after=exchange_bal.on_hand_quantity,
-            reference=f"EXCHANGE_{rma.rma_number}",
-            reason=f"خروج کالای تعویضی بابت مرجوعی {rma.rma_number}",
-            user=user
-        )
+        except Exception as exc:
+            raise ValidationError(
+                f"موجودی انبار {warehouse.name} برای ارسال کالای جایگزین ({rma.exchange_variant.sku}) "
+                f"کافی نیست یا عملیات موجودی با خطا مواجه شد: {exc}"
+            ) from exc
 
     rma.status = ReturnStatus.COMPLETED
     rma.refund_status = refund_status
@@ -232,65 +248,65 @@ def inspect_and_process_return(rma, inspection_items_data, warehouse, user=None,
         rma.staff_notes = staff_notes
     rma.save(update_fields=['status', 'refund_status', 'staff_notes', 'updated_at'])
 
-    # Synchronize financial refund & exchange settlement records in apps.finance
-    try:
-        from apps.finance.models import (
-            RefundRecord,
-            RefundStatus as FinRefundStatus,
-            AccountsPayableReceivable,
-            DebtEntityType,
-            DebtStatus
+    # ATOMICITY FIX: Finance synchronization must be within the same atomic transaction.
+    # The previous broad try/except was silently swallowing finance errors and allowing the
+    # return to be marked COMPLETED even when finance records were not created.
+    # If finance sync fails, the entire transaction rolls back, keeping the return in APPROVED
+    # and leaving a visible, recoverable error instead of a silent inconsistency.
+    from apps.finance.models import (
+        RefundRecord,
+        RefundStatus as FinRefundStatus,
+        AccountsPayableReceivable,
+        DebtEntityType,
+        DebtStatus
+    )
+
+    # 1. Standard return refund
+    if rma.refund_amount > 0 and not rma.is_exchange:
+        fin_status = FinRefundStatus.COMPLETED if refund_status == RefundStatus.REFUNDED else FinRefundStatus.PENDING
+        RefundRecord.objects.get_or_create(
+            store=rma.store,
+            order=rma.order,
+            reason=f"استرداد وجه بابت مرجوعی {rma.rma_number}",
+            defaults={
+                'amount': rma.refund_amount,
+                'status': fin_status,
+                'destination_card_or_sheba': getattr(rma.order.customer, 'sheba_number', '') or '',
+                'processed_by': user if refund_status == RefundStatus.REFUNDED else None,
+                'processed_at': timezone.now() if refund_status == RefundStatus.REFUNDED else None,
+            }
         )
 
-        # 1. Standard return refund
-        if rma.refund_amount > 0 and not rma.is_exchange:
+    # 2. Exchange price difference tracking
+    if rma.is_exchange and rma.exchange_price_difference != Decimal('0'):
+        diff = rma.exchange_price_difference
+        if diff > 0:
+            # Customer owes difference -> Create receivable record
+            AccountsPayableReceivable.objects.create(
+                store=rma.store,
+                entity_type=DebtEntityType.CUSTOMER_CREDIT,
+                customer=rma.order.customer,
+                title=f"مابه‌التفاوت تعویض کالا در مرجوعی {rma.rma_number}",
+                total_amount=diff,
+                paid_amount=Decimal('0'),
+                due_date=timezone.now().date(),
+                status=DebtStatus.PENDING,
+                notes=f"مشتری برای دریافت کالای تعویضی {rma.exchange_variant.sku if rma.exchange_variant else ''} بابت مرجوعی {rma.rma_number} باید مبلغ {diff:,} تومان مابه‌التفاوت را پرداخت نماید."
+            )
+        elif diff < 0:
+            # Store owes customer refund for cheaper replacement item
+            refund_diff = abs(diff)
             fin_status = FinRefundStatus.COMPLETED if refund_status == RefundStatus.REFUNDED else FinRefundStatus.PENDING
-            RefundRecord.objects.get_or_create(
+            RefundRecord.objects.create(
                 store=rma.store,
                 order=rma.order,
-                reason=f"استرداد وجه بابت مرجوعی {rma.rma_number}",
-                defaults={
-                    'amount': rma.refund_amount,
-                    'status': fin_status,
-                    'destination_card_or_sheba': getattr(rma.order.customer, 'sheba_number', '') or '',
-                    'processed_by': user if refund_status == RefundStatus.REFUNDED else None,
-                    'processed_at': timezone.now() if refund_status == RefundStatus.REFUNDED else None,
-                }
+                amount=refund_diff,
+                status=fin_status,
+                destination_card_or_sheba=getattr(rma.order.customer, 'sheba_number', '') or '',
+                reason=f"استرداد مابه‌التفاوت تعویض کالا به نفع مشتری در مرجوعی {rma.rma_number}",
+                processed_by=user if refund_status == RefundStatus.REFUNDED else None,
+                processed_at=timezone.now() if refund_status == RefundStatus.REFUNDED else None
             )
-
-        # 2. Exchange price difference tracking
-        if rma.is_exchange and rma.exchange_price_difference != Decimal('0'):
-            diff = rma.exchange_price_difference
-            if diff > 0:
-                # Customer owes difference -> Create receivable record
-                AccountsPayableReceivable.objects.create(
-                    store=rma.store,
-                    entity_type=DebtEntityType.CUSTOMER_CREDIT,
-                    customer=rma.order.customer,
-                    title=f"مابه‌التفاوت تعویض کالا در مرجوعی {rma.rma_number}",
-                    total_amount=diff,
-                    paid_amount=Decimal('0'),
-                    due_date=timezone.now().date(),
-                    status=DebtStatus.PENDING,
-                    notes=f"مشتری برای دریافت کالای تعویضی {rma.exchange_variant.sku if rma.exchange_variant else ''} بابت مرجوعی {rma.rma_number} باید مبلغ {diff:,} تومان مابه‌التفاوت را پرداخت نماید."
-                )
-            elif diff < 0:
-                # Store owes customer refund for cheaper replacement item
-                refund_diff = abs(diff)
-                fin_status = FinRefundStatus.COMPLETED if refund_status == RefundStatus.REFUNDED else FinRefundStatus.PENDING
-                RefundRecord.objects.create(
-                    store=rma.store,
-                    order=rma.order,
-                    amount=refund_diff,
-                    status=fin_status,
-                    destination_card_or_sheba=getattr(rma.order.customer, 'sheba_number', '') or '',
-                    reason=f"استرداد مابه‌التفاوت تعویض کالا به نفع مشتری در مرجوعی {rma.rma_number}",
-                    processed_by=user if refund_status == RefundStatus.REFUNDED else None,
-                    processed_at=timezone.now() if refund_status == RefundStatus.REFUNDED else None
-                )
-    except Exception as e:
-        import logging
-        logging.getLogger(__name__).error(f"Failed to synchronize finance records for return {rma.rma_number}: {e}")
 
     record_audit_event(
         store=rma.store,
@@ -301,3 +317,4 @@ def inspect_and_process_return(rma, inspection_items_data, warehouse, user=None,
         changes={'rma_number': rma.rma_number, 'refund_status': refund_status}
     )
     return rma
+

@@ -59,11 +59,41 @@ jobs:
         run: |
           python manage.py makemigrations --check --dry-run
 
-      - name: Run Pytest Test Suite
+      - name: Verify Database Engine is PostgreSQL
         working-directory: ./backend
         env:
           DJANGO_DEBUG: "True"
           DJANGO_SECRET_KEY: "ci-secret-key-for-building-and-testing-only"
+          DB_HOST: "localhost"
+          DB_PORT: "5432"
+          DB_NAME: "shoppilot_test"
+          DB_USER: "shoppilot"
+          DB_PASSWORD: "shoppilot_test_password"
+        run: |
+          python -c "
+          import django, os, sys
+          os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'config.settings')
+          django.setup()
+          from django.db import connection
+          engine = connection.settings_dict['ENGINE']
+          print(f'Resolved database engine: {engine}')
+          if 'postgresql' not in engine:
+              print(f'ERROR: Expected PostgreSQL but got: {engine}. Tests will not run.')
+              sys.exit(1)
+          print('PostgreSQL confirmed. Proceeding with tests.')
+          "
+
+      - name: Run Pytest Test Suite (PostgreSQL)
+        working-directory: ./backend
+        env:
+          DJANGO_DEBUG: "True"
+          DJANGO_SECRET_KEY: "ci-secret-key-for-building-and-testing-only"
+          DB_HOST: "localhost"
+          DB_PORT: "5432"
+          DB_NAME: "shoppilot_test"
+          DB_USER: "shoppilot"
+          DB_PASSWORD: "shoppilot_test_password"
+          REDIS_URL: "redis://localhost:6379/0"
         run: |
           pytest -v
 

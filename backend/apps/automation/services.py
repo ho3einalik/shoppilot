@@ -89,6 +89,8 @@ def sanitize_payload(payload):
             sanitized[k] = '***REDACTED***'
         elif isinstance(v, dict):
             sanitized[k] = sanitize_payload(v)
+        elif isinstance(v, list):
+            sanitized[k] = [sanitize_payload(i) if isinstance(i, dict) else i for i in v]
         elif isinstance(v, str) and len(v) == 11 and v.startswith('09'):
             # Mask phone numbers in payload logs
             sanitized[k] = v[:4] + '****' + v[-3:]

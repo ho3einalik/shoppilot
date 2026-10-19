@@ -17,4 +17,6 @@ COPY . /app/
 
 EXPOSE 8000
 
-CMD ["python", "manage.py", "runserver", "0.0.0.0:8000"]
+# Production: use Gunicorn (already in requirements.txt).
+# Override CMD with `python manage.py runserver` in development docker-compose only.
+CMD ["gunicorn", "config.wsgi:application", "--bind", "0.0.0.0:8000", "--workers", "3", "--timeout", "60"]

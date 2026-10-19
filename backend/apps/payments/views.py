@@ -1,5 +1,6 @@
 from rest_framework import viewsets, filters, status
 from rest_framework.decorators import action
+from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from django_filters.rest_framework import DjangoFilterBackend
 from apps.tenancy.permissions import IsStoreMemberPermission, TenantFilterBackend, Role, user_has_store_permission
@@ -129,9 +130,17 @@ class PaymentTransactionViewSet(viewsets.ModelViewSet):
             verified_sum = sum(
                 p.amount for p in order.payments.filter(status=PaymentVerificationStatus.VERIFIED)
             )
+            pending_sum = sum(
+                p.amount for p in order.payments.filter(status=PaymentVerificationStatus.PENDING_VERIFICATION)
+            )
             remaining_payable = max(Decimal('0'), order.grand_total - verified_sum)
             if remaining_payable <= 0:
                 return Response({'error': 'این سفارش قبلاً به طور کامل تسویه شده است.'}, status=status.HTTP_400_BAD_REQUEST)
+            if verified_sum + pending_sum >= order.grand_total:
+                return Response(
+                    {'error': 'یک تراکنش در حال انجام برای این سفارش وجود دارد. لطفاً پس از تکمیل یا انقضای آن دوباره تلاش کنید.'},
+                    status=status.HTTP_409_CONFLICT
+                )
 
             order_number = order.order_number
             order_currency = order.currency
@@ -167,8 +176,17 @@ class PaymentTransactionViewSet(viewsets.ModelViewSet):
             curr_verified = sum(
                 p.amount for p in ref_order.payments.filter(status=PaymentVerificationStatus.VERIFIED)
             )
+            # Also count active PENDING_VERIFICATION transactions to detect concurrent checkouts
+            curr_pending = sum(
+                p.amount for p in ref_order.payments.filter(status=PaymentVerificationStatus.PENDING_VERIFICATION)
+            )
             if curr_verified >= ref_order.grand_total:
                 return Response({'error': 'سفارش همزمان توسط تراکنش دیگری تسویه شد.'}, status=status.HTTP_400_BAD_REQUEST)
+            if curr_verified + curr_pending >= ref_order.grand_total:
+                return Response(
+                    {'error': 'یک تراکنش در حال انجام برای این سفارش وجود دارد. لطفاً پس از تکمیل یا انقضای آن دوباره تلاش کنید.'},
+                    status=status.HTTP_409_CONFLICT
+                )
 
             payment = PaymentTransaction.objects.create(
                 store=store,
@@ -250,9 +268,15 @@ class PaymentTransactionViewSet(viewsets.ModelViewSet):
 
         return callback_url.strip()
 
-    @action(detail=False, methods=['get', 'post'], url_path='online-verify')
+    @action(detail=False, methods=['get', 'post'], url_path='online-verify',
+            permission_classes=[AllowAny])
     def online_verify(self, request):
-        """Verifies online payment callback with the payment gateway idempotently"""
+        """Verifies online payment callback with the payment gateway idempotently.
+
+        Permission: AllowAny — anonymous gateway callbacks from payment providers must reach
+        this endpoint without a Bearer token. Authenticated users also have access.
+        Security is enforced by server-to-server gateway verification, NOT by user identity.
+        """
         authority = (
             request.data.get('authority')
             or request.data.get('Authority')
@@ -265,7 +289,7 @@ class PaymentTransactionViewSet(viewsets.ModelViewSet):
             or request.data.get('status')
             or request.query_params.get('status')
         )
-        gateway_name = request.data.get('gateway', 'zarinpal')
+        # NOTE: caller-supplied 'gateway' param is intentionally ignored — see security note below.
 
         if not authority:
             return Response({'error': 'پارامتر authority یا شناسه ارجاع الزامی است.'}, status=status.HTTP_400_BAD_REQUEST)
@@ -280,7 +304,7 @@ class PaymentTransactionViewSet(viewsets.ModelViewSet):
 
         store = payment.store
         req_store = getattr(request, 'store', None)
-        if req_store and req_store.id != store.id and not (request.user and (request.user.is_superuser or request.user.is_staff)):
+        if req_store and req_store.id != store.id and not (request.user and request.user.is_authenticated and (request.user.is_superuser or request.user.is_staff)):
             return Response({'error': 'عدم تطابق فروشگاه تراکنش با درخواست.'}, status=status.HTTP_403_FORBIDDEN)
 
         if payment.status == PaymentVerificationStatus.VERIFIED:
@@ -291,32 +315,27 @@ class PaymentTransactionViewSet(viewsets.ModelViewSet):
                 'payment': PaymentTransactionSerializer(payment).data
             }, status=status.HTTP_200_OK)
 
-        if status_param and str(status_param).upper() in ['NOK', 'CANCELLED', 'CANCELED']:
-            with transaction.atomic():
-                p = PaymentTransaction.objects.select_for_update().get(id=payment.id)
-                if p.status != PaymentVerificationStatus.VERIFIED:
-                    p.rejection_reason = "تراکنش توسط کاربر در صفحه درگاه لغو شد."
-                    p.status = PaymentVerificationStatus.REJECTED
-                    p.save(update_fields=['status', 'rejection_reason', 'updated_at'])
-            return Response({
-                'success': False,
-                'status': 'CANCELLED_BY_USER',
-                'message': 'پرداخت توسط کاربر لغو شد.',
-                'payment': PaymentTransactionSerializer(payment).data
-            }, status=status.HTTP_400_BAD_REQUEST)
-
+        # SECURITY: Never use a caller-supplied gateway name. A malicious caller could name
+        # a different provider to route verification through an unrelated or non-existent provider.
+        # The gateway is always 'zarinpal' for online ONLINE_GATEWAY transactions.
         from .gateways import get_payment_gateway
-        gateway = get_payment_gateway(gateway_name)
+        gateway = get_payment_gateway('zarinpal')
         if not gateway:
-            return Response({'error': 'درگاه پرداخت نامعتبر است.'}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({'error': 'درگاه پرداخت آنلاین پیکربندی نشده است.'}, status=status.HTTP_400_BAD_REQUEST)
 
-        # Call gateway verify outside DB lock
+        # SECURITY: Do NOT trust user-controlled NOK/CANCELLED status parameter alone.
+        # A forged cancellation cannot alter the final state without gateway-confirmed rejection.
+        # Always call gateway server-to-server verify first — it is the sole authoritative source.
+        user_claimed_cancelled = status_param and str(status_param).upper() in ['NOK', 'CANCELLED', 'CANCELED']
+
+        # Call gateway verify OUTSIDE DB lock (network I/O must not hold a DB lock)
         res = gateway.verify_payment(
             authority=authority,
             amount=payment.amount,
             store=store,
             currency=payment.currency
         )
+
         if res.success:
             with transaction.atomic():
                 p = PaymentTransaction.objects.select_for_update().get(id=payment.id)
@@ -333,14 +352,33 @@ class PaymentTransactionViewSet(viewsets.ModelViewSet):
                 'tracking_code': res.tracking_code,
                 'payment': PaymentTransactionSerializer(verified).data
             }, status=status.HTTP_200_OK)
+
+        elif res.status == 'COMMUNICATION_ERROR':
+            # Network failure/timeout: do NOT permanently reject. Leave as PENDING_VERIFICATION so
+            # reconciliation can retry. Never falsely report success or failure on uncertain outcomes.
+            return Response({
+                **res.to_dict(),
+                'message': 'خطا در ارتباط با درگاه پرداخت. وضعیت تراکنش برای تطبیق‌پذیری حفظ شد.',
+                'retry': True,
+            }, status=status.HTTP_502_BAD_GATEWAY)
+
         else:
-            # If communication error/timeout, do not permanently reject; keep in PENDING_VERIFICATION for retry/reconciliation
-            if res.status != 'COMMUNICATION_ERROR':
-                with transaction.atomic():
-                    p = PaymentTransaction.objects.select_for_update().get(id=payment.id)
-                    if p.status != PaymentVerificationStatus.VERIFIED:
-                        p.status = PaymentVerificationStatus.REJECTED
+            # Gateway definitively rejected. Only now mark REJECTED — never based on user-supplied params alone.
+            with transaction.atomic():
+                p = PaymentTransaction.objects.select_for_update().get(id=payment.id)
+                if p.status != PaymentVerificationStatus.VERIFIED:
+                    if user_claimed_cancelled:
+                        p.rejection_reason = "تراکنش توسط کاربر لغو شد و درگاه آن را تأیید نکرد."
+                    else:
                         p.rejection_reason = res.message
-                        p.save(update_fields=['status', 'rejection_reason', 'updated_at'])
-            return Response(res.to_dict(), status=status.HTTP_400_BAD_REQUEST)
+                    p.status = PaymentVerificationStatus.REJECTED
+                    p.save(update_fields=['status', 'rejection_reason', 'updated_at'])
+            return Response({
+                'success': False,
+                'status': 'CANCELLED_BY_USER' if user_claimed_cancelled else res.status,
+                'message': p.rejection_reason,
+                'payment': PaymentTransactionSerializer(p).data
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+
 
