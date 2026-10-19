@@ -43,10 +43,70 @@ def create_order(store, customer_data, items_data, warehouse, channel=OrderChann
 
     if not items_data:
         raise ValueError("سفارش باید حداقل دارای یک ردیف کالا باشد.")
+    shipping_cost = Decimal(str(shipping_cost))
     if shipping_cost < Decimal('0'):
         raise ValueError("هزینه ارسال نمی‌تواند منفی باشد.")
+    discount_amount = Decimal(str(discount_amount))
     if discount_amount < Decimal('0'):
         raise ValueError("مبلغ تخفیف نمی‌تواند منفی باشد.")
+
+    # Upfront validation of all items before any state mutations
+    validated_items = []
+    total_items_price = Decimal('0')
+    for item in items_data:
+        variant_id = item.get('variant_id')
+        if not variant_id:
+            raise ValueError("شناسه تنوع محصول (variant_id) الزامی است.")
+
+        try:
+            qty = int(item.get('quantity', 1))
+        except (ValueError, TypeError):
+            raise ValueError("تعداد کالا باید یک عدد صحیح باشد.")
+        if qty <= 0:
+            raise ValueError("تعداد کالا باید بزرگتر از صفر باشد.")
+
+        try:
+            variant = ProductVariant.objects.select_related('product').get(id=variant_id, store=store)
+        except ProductVariant.DoesNotExist:
+            raise ValueError(f"تنوع محصول با شناسه {variant_id} در این فروشگاه یافت نشد.")
+
+        try:
+            raw_unit_price = item.get('unit_price')
+            unit_price = Decimal(str(raw_unit_price)) if raw_unit_price is not None else variant.retail_price
+        except (ValueError, InvalidOperation):
+            raise ValueError("قیمت واحد نامعتبر است.")
+        if unit_price < Decimal('0'):
+            raise ValueError("قیمت واحد نمی‌تواند منفی باشد.")
+        if unit_price == Decimal('0') and variant.retail_price > Decimal('0'):
+            unit_price = variant.retail_price
+
+        try:
+            unit_discount = Decimal(str(item.get('unit_discount', 0)))
+        except (ValueError, InvalidOperation):
+            raise ValueError("تخفیف واحد نامعتبر است.")
+        if unit_discount < Decimal('0'):
+            raise ValueError("تخفیف ردیف کالا نمی‌تواند منفی باشد.")
+        if unit_discount > unit_price:
+            raise ValueError(f"تخفیف ردیف کالا ({unit_discount}) نمی‌تواند از قیمت واحد ({unit_price}) بیشتر باشد.")
+
+        item_total = (unit_price - unit_discount) * qty
+        total_items_price += item_total
+        validated_items.append({
+            'variant': variant,
+            'quantity': qty,
+            'unit_price': unit_price,
+            'unit_discount': unit_discount,
+            'item_total': item_total,
+        })
+
+    # Validate order-level discount does not exceed payable items and shipping
+    max_allowable_discount = total_items_price + shipping_cost
+    if discount_amount > max_allowable_discount:
+        raise ValueError(
+            f"مبلغ تخفیف سفارش ({discount_amount}) نمی‌تواند از مجموع اقلام و هزینه ارسال ({max_allowable_discount}) بیشتر باشد."
+        )
+
+    grand_total = max(Decimal('0'), total_items_price + shipping_cost - discount_amount)
 
     # IDENTITY FIX: Do not fall back to a shared placeholder phone number.
     # Merging all phoneless customers under '09000000000' corrupts CRM data by conflating
@@ -80,39 +140,40 @@ def create_order(store, customer_data, items_data, warehouse, channel=OrderChann
         customer.marketing_opt_in = opt_in
         customer.save(update_fields=['marketing_opt_in', 'updated_at'])
 
-    order_number = generate_order_number(store)
-    order = Order.objects.create(
-        store=store,
-        order_number=order_number,
-        channel=channel,
-        customer=customer,
-        warehouse=warehouse,
-        currency=store.currency,
-        order_status=OrderStatus.CONFIRMED,
-        payment_status=PaymentStatus.PENDING,
-        fulfillment_status=FulfillmentStatus.UNFULFILLED,
-        shipping_cost=shipping_cost,
-        discount_amount=discount_amount,
-        utm_source=utm_source,
-        utm_medium=utm_medium,
-        utm_campaign=utm_campaign,
-        notes=notes,
-        created_by=user
-    )
+    # Collision-safe order creation with savepoint retry loop
+    order = None
+    for attempt in range(5):
+        candidate_order_number = generate_order_number(store)
+        try:
+            with transaction.atomic():
+                order = Order.objects.create(
+                    store=store,
+                    order_number=candidate_order_number,
+                    channel=channel,
+                    customer=customer,
+                    warehouse=warehouse,
+                    currency=store.currency,
+                    order_status=OrderStatus.CONFIRMED,
+                    payment_status=PaymentStatus.PENDING,
+                    fulfillment_status=FulfillmentStatus.UNFULFILLED,
+                    total_items_price=total_items_price,
+                    shipping_cost=shipping_cost,
+                    discount_amount=discount_amount,
+                    grand_total=grand_total,
+                    utm_source=utm_source,
+                    utm_medium=utm_medium,
+                    utm_campaign=utm_campaign,
+                    notes=notes,
+                    created_by=user
+                )
+                break
+        except IntegrityError:
+            if attempt == 4:
+                raise
 
-    total_items = Decimal('0')
-    for item in items_data:
-        variant_id = item.get('variant_id')
-        qty = int(item.get('quantity', 1))
-        if qty <= 0:
-            raise ValueError("تعداد کالا باید بزرگتر از صفر باشد.")
-        unit_price = Decimal(str(item.get('unit_price', 0)))
-        if unit_price < Decimal('0'):
-            raise ValueError("قیمت واحد نمی‌تواند منفی باشد.")
-
-        variant = ProductVariant.objects.select_related('product').get(id=variant_id, store=store)
-        if unit_price <= 0:
-            unit_price = variant.retail_price
+    for item_info in validated_items:
+        variant = item_info['variant']
+        qty = item_info['quantity']
 
         # Atomic reservation check
         reserve_stock(
@@ -124,24 +185,17 @@ def create_order(store, customer_data, items_data, warehouse, channel=OrderChann
             user=user
         )
 
-        item_total = (unit_price * qty) - Decimal(str(item.get('unit_discount', 0))) * qty
-        total_items += item_total
-
         OrderItem.objects.create(
             order=order,
             variant=variant,
             variant_sku=variant.sku,
             variant_name=f"{variant.product.name} ({variant.name})",
             quantity=qty,
-            unit_price=unit_price,
+            unit_price=item_info['unit_price'],
             cost_price_snapshot=variant.cost_price,  # Historical margin preservation!
-            unit_discount=Decimal(str(item.get('unit_discount', 0))),
-            total_price=item_total
+            unit_discount=item_info['unit_discount'],
+            total_price=item_info['item_total']
         )
-
-    order.total_items_price = total_items
-    order.grand_total = max(Decimal('0'), total_items + shipping_cost - discount_amount)
-    order.save()
 
     record_audit_event(
         store=store,

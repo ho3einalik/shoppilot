@@ -8,7 +8,7 @@ services:
     environment:
       POSTGRES_DB: ${DB_NAME:-shoppilot}
       POSTGRES_USER: ${DB_USER:-shoppilot_user}
-      POSTGRES_PASSWORD: ${DB_PASSWORD:-shoppilot_secure_password}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD must be set in .env}
     # No exposed ports to host in production!
     volumes:
       - postgres_prod_data:/var/lib/postgresql/data
@@ -45,10 +45,10 @@ services:
     environment:
       - DJANGO_DEBUG=False
       - DEBUG=False
-      - DJANGO_SECRET_KEY=${DJANGO_SECRET_KEY}
+      - DJANGO_SECRET_KEY=${DJANGO_SECRET_KEY:?DJANGO_SECRET_KEY must be set in .env}
       - DB_NAME=${DB_NAME:-shoppilot}
       - DB_USER=${DB_USER:-shoppilot_user}
-      - DB_PASSWORD=${DB_PASSWORD:-shoppilot_secure_password}
+      - DB_PASSWORD=${DB_PASSWORD:?DB_PASSWORD must be set in .env}
       - DB_HOST=db
       - DB_PORT=5432
       - REDIS_URL=redis://redis:6379/0
@@ -78,10 +78,10 @@ services:
     environment:
       - DJANGO_DEBUG=False
       - DEBUG=False
-      - DJANGO_SECRET_KEY=${DJANGO_SECRET_KEY}
+      - DJANGO_SECRET_KEY=${DJANGO_SECRET_KEY:?DJANGO_SECRET_KEY must be set in .env}
       - DB_NAME=${DB_NAME:-shoppilot}
       - DB_USER=${DB_USER:-shoppilot_user}
-      - DB_PASSWORD=${DB_PASSWORD:-shoppilot_secure_password}
+      - DB_PASSWORD=${DB_PASSWORD:?DB_PASSWORD must be set in .env}
       - DB_HOST=db
       - DB_PORT=5432
       - REDIS_URL=redis://redis:6379/0
@@ -105,10 +105,10 @@ services:
     environment:
       - DJANGO_DEBUG=False
       - DEBUG=False
-      - DJANGO_SECRET_KEY=${DJANGO_SECRET_KEY}
+      - DJANGO_SECRET_KEY=${DJANGO_SECRET_KEY:?DJANGO_SECRET_KEY must be set in .env}
       - DB_NAME=${DB_NAME:-shoppilot}
       - DB_USER=${DB_USER:-shoppilot_user}
-      - DB_PASSWORD=${DB_PASSWORD:-shoppilot_secure_password}
+      - DB_PASSWORD=${DB_PASSWORD:?DB_PASSWORD must be set in .env}
       - DB_HOST=db
       - DB_PORT=5432
       - REDIS_URL=redis://redis:6379/0

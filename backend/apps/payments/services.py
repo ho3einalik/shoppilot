@@ -115,13 +115,24 @@ def reject_payment_transaction(payment, reason, user):
 
 
 @transaction.atomic
-def process_payment_refund(payment, amount=None, reason="", user=None):
+def process_payment_refund(payment, amount=None, reason="", user=None, is_manual=None):
     """
     Safely and idempotently refunds a verified payment transaction.
     Pessimistically locks PaymentTransaction and Order to prevent over-refunds.
     Supports partial and cumulative refunds.
+
+    For online payment gateway transactions (method == PaymentMethod.ONLINE_GATEWAY):
+    - If is_manual is False: caller explicitly demands automated gateway refund.
+      Calls payment gateway refund API. If gateway is unconfigured or rejects,
+      raises ValidationError instead of falsely recording successful refund.
+    - If is_manual is True: staff explicitly chose manual refund (card-to-card/Paya),
+      recorded as manual refund with audit trail.
+    - If is_manual is None (default): if gateway credentials are fully configured,
+      attempts gateway refund. If gateway is unconfigured, records as manual refund
+      with an explicit audit note.
     """
     from rest_framework.exceptions import ValidationError
+    from .models import PaymentMethod
     payment = PaymentTransaction.objects.select_for_update().get(id=payment.id)
     if payment.status not in [PaymentVerificationStatus.VERIFIED, PaymentVerificationStatus.REFUNDED]:
         raise ValidationError("تنها تراکنش‌های تأییدشده قابل استرداد (ریفاند) هستند.")
@@ -143,12 +154,47 @@ def process_payment_refund(payment, amount=None, reason="", user=None):
             f"مبلغ درخواستی برای استرداد ({refund_amount}) نمی‌تواند از مانده قابل استرداد تراکنش ({remaining_refundable}) بیشتر باشد."
         )
 
+    # Online gateway check: If online transaction and not marked as manual refund, call gateway refund API
+    gateway_refund_ref = ""
+    effective_manual = bool(is_manual) if is_manual is not None else False
+
+    if payment.method == PaymentMethod.ONLINE_GATEWAY:
+        from .gateways import get_payment_gateway
+        gateway = get_payment_gateway('zarinpal')
+        has_creds = gateway and hasattr(gateway, 'has_refund_credentials') and gateway.has_refund_credentials(payment.store)
+
+        if is_manual is False or (is_manual is None and has_creds):
+            if not gateway:
+                raise ValidationError("درگاه پرداخت جهت استرداد آنلاین خودکار پیکربندی نشده است. در صورت بازگشت دستی وجه، گزینه «استرداد دستی» را انتخاب فرمایید.")
+
+            res = gateway.refund_payment(
+                authority=payment.reference_number,
+                amount=refund_amount,
+                store=payment.store,
+                currency=payment.currency
+            )
+            if not res.success:
+                raise ValidationError(
+                    f"استرداد خودکار از طریق درگاه با خطا مواجه شد ({res.message}). "
+                    "در صورت استرداد دستی وجه به حساب مشتری، گزینه «استرداد دستی» (is_manual=True) را انتخاب نمایید."
+                )
+            gateway_refund_ref = res.tracking_code
+            effective_manual = False
+        else:
+            effective_manual = True
+    else:
+        effective_manual = True
+
     payment.refunded_amount = curr_refunded + refund_amount
     if payment.refunded_amount >= payment.amount:
         payment.status = PaymentVerificationStatus.REFUNDED
 
-    payment.rejection_reason = f"مسترد شده: {reason} (مبلغ استرداد: {refund_amount})" if reason else f"مسترد شده (مبلغ: {refund_amount})"
-    payment.save(update_fields=['status', 'refunded_amount', 'rejection_reason', 'updated_at'])
+    prefix = "[استرداد دستی] " if effective_manual else ("[استرداد درگاه] " if payment.method == PaymentMethod.ONLINE_GATEWAY else "")
+    extra = f" (کد پیگیری: {gateway_refund_ref})" if gateway_refund_ref else ""
+    payment.rejection_reason = f"{prefix}مسترد شده: {reason}{extra} (مبلغ: {refund_amount})" if reason else f"{prefix}مسترد شده{extra} (مبلغ: {refund_amount})"
+    if gateway_refund_ref:
+        payment.tracking_code = gateway_refund_ref
+    payment.save(update_fields=['status', 'refunded_amount', 'rejection_reason', 'tracking_code', 'updated_at'])
 
     # Recalculate net verified paid across all payments for order
     all_order_payments = order.payments.all()
@@ -172,7 +218,13 @@ def process_payment_refund(payment, amount=None, reason="", user=None):
         action="PAYMENT_REFUNDED",
         target_type="PaymentTransaction",
         target_id=str(payment.id),
-        changes={'order_number': order.order_number, 'refund_amount': str(refund_amount), 'reason': reason}
+        changes={
+            'order_number': order.order_number,
+            'refund_amount': str(refund_amount),
+            'reason': reason,
+            'is_manual': is_manual,
+            'gateway_tracking_code': gateway_refund_ref
+        }
     )
     return payment
 

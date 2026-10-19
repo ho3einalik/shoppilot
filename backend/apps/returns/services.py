@@ -234,7 +234,8 @@ def inspect_and_process_return(rma, inspection_items_data, warehouse, user=None,
                 variant=rma.exchange_variant,
                 quantity=rma.exchange_quantity,
                 reference=f"EXCHANGE_{rma.rma_number}",
-                user=user
+                user=user,
+                is_reservation=False
             )
         except Exception as exc:
             raise ValidationError(

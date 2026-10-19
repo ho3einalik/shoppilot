@@ -103,7 +103,8 @@ def pos_quick_checkout(store, session_id, items_data, customer_phone="0900000000
                 variant=variant,
                 quantity=qty,
                 reference=order.order_number,
-                user=user
+                user=user,
+                is_reservation=False
             )
         except InsufficientStockError as e:
             raise ValidationError(f"موجودی کافی در انبار {warehouse.name} برای تنوع {variant.sku} وجود ندارد: {str(e)}")

@@ -442,3 +442,413 @@ class TestMarketingAndAutomationRemediations:
         assert sanitized['payments'][0]['card_number'] == '***REDACTED***'
         assert sanitized['payments'][1]['token'] == '***REDACTED***'
         assert sanitized['payments'][1]['cvv2'] == '***REDACTED***'
+
+
+@pytest.mark.django_db
+class TestComprehensiveCodeRemediations:
+    @pytest.fixture
+    def store_context(self):
+        user = User.objects.create_user(email="comp_remedy@example.com", password="pass", full_name="Comp Owner")
+        biz = Business.objects.create(name="Comp Biz", owner=user)
+        store = Store.objects.create(business=biz, name="Comp Store", currency="IRT")
+        StoreMembership.objects.create(store=store, user=user, role=Role.OWNER, is_active=True)
+        warehouse = Warehouse.objects.create(store=store, name="Main Wh", is_default=True)
+        product = Product.objects.create(store=store, name="Test Product")
+        variant = ProductVariant.objects.create(
+            store=store,
+            product=product,
+            sku="SKU-COMP-001",
+            name="Variant 1",
+            retail_price=Decimal('100000'),
+            cost_price=Decimal('60000')
+        )
+        adjust_stock(store, warehouse, variant, 50, reference="INIT", user=user)
+        customer = Customer.objects.create(
+            store=store,
+            full_name="Reza Test",
+            phone_number="09129998877"
+        )
+        return {
+            'user': user,
+            'store': store,
+            'warehouse': warehouse,
+            'product': product,
+            'variant': variant,
+            'customer': customer
+        }
+
+    def test_customer_model_marketing_opt_in_defaults_to_false(self, store_context):
+        """Item 7: Customer.marketing_opt_in must default to False on direct creation."""
+        cust = Customer.objects.create(
+            store=store_context['store'],
+            full_name="Direct Cust",
+            phone_number="09187654321"
+        )
+        assert cust.marketing_opt_in is False
+
+    def test_online_gateway_refund_requires_config_or_manual_flag(self, store_context):
+        """Item 1: Online payment refund fails safely if gateway not configured unless manual refund is flagged."""
+        from rest_framework.exceptions import ValidationError
+        from apps.payments.services import process_payment_refund
+
+        store = store_context['store']
+        order = Order.objects.create(
+            store=store,
+            order_number="ORD-REFUND-001",
+            customer=store_context['customer'],
+            warehouse=store_context['warehouse'],
+            grand_total=Decimal('100000'),
+            payment_status=PaymentStatus.PAID
+        )
+        payment = PaymentTransaction.objects.create(
+            store=store,
+            order=order,
+            method=PaymentMethod.ONLINE_GATEWAY,
+            amount=Decimal('100000'),
+            reference_number="AUTH-NO-TOKEN",
+            status=PaymentVerificationStatus.VERIFIED
+        )
+
+        # 1. Automatic refund without token must fail and NOT mark payment REFUNDED
+        with pytest.raises(ValidationError) as exc:
+            process_payment_refund(payment=payment, amount=Decimal('100000'), reason="Faulty product", is_manual=False)
+        assert any(phrase in str(exc.value) for phrase in ["توکن دسترسی درگاه", "پیکربندی نشده"])
+
+        payment.refresh_from_db()
+        assert payment.status == PaymentVerificationStatus.VERIFIED
+        assert payment.refunded_amount == Decimal('0')
+
+        # 2. Staff manual refund succeeds with explicit audit tag
+        refunded = process_payment_refund(payment=payment, amount=Decimal('50000'), reason="Manual bank transfer", is_manual=True)
+        payment.refresh_from_db()
+        assert payment.refunded_amount == Decimal('50000')
+        assert "[استرداد دستی]" in payment.rejection_reason
+
+    def test_online_gateway_refund_with_successful_gateway_call(self, store_context):
+        """Item 1: Online refund marks transaction REFUNDED when gateway refund returns success."""
+        from apps.payments.services import process_payment_refund
+
+        store = store_context['store']
+        order = Order.objects.create(
+            store=store,
+            order_number="ORD-REFUND-002",
+            customer=store_context['customer'],
+            warehouse=store_context['warehouse'],
+            grand_total=Decimal('100000'),
+            payment_status=PaymentStatus.PAID
+        )
+        payment = PaymentTransaction.objects.create(
+            store=store,
+            order=order,
+            method=PaymentMethod.ONLINE_GATEWAY,
+            amount=Decimal('100000'),
+            reference_number="AUTH-VALID-REFUND",
+            status=PaymentVerificationStatus.VERIFIED
+        )
+
+        mock_result = GatewayPaymentResult(
+            success=True,
+            status='REFUNDED',
+            tracking_code='ZARIN-REF-998877',
+            message='استرداد وجه با موفقیت انجام شد.'
+        )
+
+        with patch('apps.payments.gateways.ZarinpalGatewayAdapter.refund_payment', return_value=mock_result):
+            refunded = process_payment_refund(payment=payment, amount=Decimal('100000'), reason="Return", is_manual=False)
+
+        payment.refresh_from_db()
+        assert payment.status == PaymentVerificationStatus.REFUNDED
+        assert payment.tracking_code == 'ZARIN-REF-998877'
+        assert "[استرداد درگاه]" in payment.rejection_reason
+
+    def test_checkout_deducts_pending_sum_and_pre_creates_transaction(self, store_context):
+        """Item 2: Checkout accounts for pending transactions and pre-creates transaction before network call."""
+        client = APIClient()
+        client.force_authenticate(user=store_context['user'])
+        store = store_context['store']
+
+        order = Order.objects.create(
+            store=store,
+            order_number="ORD-RACE-001",
+            customer=store_context['customer'],
+            warehouse=store_context['warehouse'],
+            grand_total=Decimal('100000'),
+            payment_status=PaymentStatus.PARTIALLY_PAID
+        )
+        # 30,000 verified
+        PaymentTransaction.objects.create(
+            store=store,
+            order=order,
+            method=PaymentMethod.CARD_TO_CARD,
+            amount=Decimal('30000'),
+            status=PaymentVerificationStatus.VERIFIED
+        )
+        # 20,000 pending
+        PaymentTransaction.objects.create(
+            store=store,
+            order=order,
+            method=PaymentMethod.ONLINE_GATEWAY,
+            amount=Decimal('20000'),
+            status=PaymentVerificationStatus.PENDING_VERIFICATION
+        )
+
+        # Remaining payable should be 100,000 - 30,000 - 20,000 = 50,000!
+        mock_gateway = MagicMock()
+        mock_gateway.request_payment.return_value = {
+            'success': True,
+            'authority': 'ZARIN-NEW-AUTH-50000',
+            'payment_url': 'https://sandbox.zarinpal.com/pg/StartPay/ZARIN-NEW-AUTH-50000'
+        }
+
+        with patch('apps.payments.views.get_payment_gateway', return_value=mock_gateway):
+            resp = client.post(
+                '/api/v1/payments/online-checkout/',
+                {'order_id': str(order.id)},
+                HTTP_X_STORE_ID=str(store.id),
+                format='json'
+            )
+
+        assert resp.status_code == status.HTTP_200_OK
+        assert resp.data['amount'] == Decimal('50000')
+        assert resp.data['authority'] == 'ZARIN-NEW-AUTH-50000'
+
+        # Verify gateway was requested for exactly 50,000
+        mock_gateway.request_payment.assert_called_once()
+        assert mock_gateway.request_payment.call_args[1]['amount'] == Decimal('50000')
+
+        # Verify transaction is persisted with authority in DB
+        tx = PaymentTransaction.objects.get(id=resp.data['payment_id'])
+        assert tx.reference_number == 'ZARIN-NEW-AUTH-50000'
+        assert tx.status == PaymentVerificationStatus.PENDING_VERIFICATION
+
+    def test_checkout_gateway_failure_marks_transaction_rejected_and_frees_slot(self, store_context):
+        """Item 2: If gateway network call fails, transaction is marked REJECTED so balance is not permanently locked."""
+        client = APIClient()
+        client.force_authenticate(user=store_context['user'])
+        store = store_context['store']
+
+        order = Order.objects.create(
+            store=store,
+            order_number="ORD-FAIL-001",
+            customer=store_context['customer'],
+            warehouse=store_context['warehouse'],
+            grand_total=Decimal('50000'),
+            payment_status=PaymentStatus.PENDING
+        )
+
+        mock_gateway = MagicMock()
+        mock_gateway.request_payment.return_value = {
+            'success': False,
+            'status': 'COMMUNICATION_ERROR',
+            'message': 'درگاه در دسترس نیست.'
+        }
+
+        with patch('apps.payments.views.get_payment_gateway', return_value=mock_gateway):
+            resp = client.post(
+                '/api/v1/payments/online-checkout/',
+                {'order_id': str(order.id)},
+                HTTP_X_STORE_ID=str(store.id),
+                format='json'
+            )
+
+        assert resp.status_code == status.HTTP_502_BAD_GATEWAY
+        # Pre-created transaction must be marked REJECTED
+        failed_tx = PaymentTransaction.objects.filter(order=order).first()
+        assert failed_tx is not None
+        assert failed_tx.status == PaymentVerificationStatus.REJECTED
+
+    def test_online_verify_rejects_non_gateway_and_terminal_states(self, store_context):
+        """Item 3: Callback ignores non-gateway payments and rejects re-verifying refunded/rejected transactions."""
+        client = APIClient()
+        store = store_context['store']
+
+        order = Order.objects.create(
+            store=store,
+            order_number="ORD-VERIFY-001",
+            customer=store_context['customer'],
+            warehouse=store_context['warehouse'],
+            grand_total=Decimal('50000'),
+            payment_status=PaymentStatus.PENDING
+        )
+
+        # 1. Non-gateway method must not be verified by online callback
+        PaymentTransaction.objects.create(
+            store=store,
+            order=order,
+            method=PaymentMethod.CARD_TO_CARD,
+            amount=Decimal('50000'),
+            reference_number="NON-GATEWAY-REF",
+            status=PaymentVerificationStatus.PENDING_VERIFICATION
+        )
+        resp1 = client.get('/api/v1/payments/online-verify/', {'Authority': 'NON-GATEWAY-REF'})
+        assert resp1.status_code == status.HTTP_404_NOT_FOUND
+
+        # 2. Refunded transaction must reject re-verification
+        refunded_tx = PaymentTransaction.objects.create(
+            store=store,
+            order=order,
+            method=PaymentMethod.ONLINE_GATEWAY,
+            amount=Decimal('50000'),
+            reference_number="REFUNDED-AUTH-001",
+            status=PaymentVerificationStatus.REFUNDED
+        )
+        resp2 = client.get('/api/v1/payments/online-verify/', {'Authority': 'REFUNDED-AUTH-001'})
+        assert resp2.status_code == status.HTTP_400_BAD_REQUEST
+        assert resp2.data['status'] == 'ALREADY_REFUNDED'
+
+        # 3. Rejected transaction must reject re-verification
+        rejected_tx = PaymentTransaction.objects.create(
+            store=store,
+            order=order,
+            method=PaymentMethod.ONLINE_GATEWAY,
+            amount=Decimal('50000'),
+            reference_number="REJECTED-AUTH-001",
+            status=PaymentVerificationStatus.REJECTED,
+            rejection_reason="Card expired"
+        )
+        resp3 = client.get('/api/v1/payments/online-verify/', {'Authority': 'REJECTED-AUTH-001'})
+        assert resp3.status_code == status.HTTP_400_BAD_REQUEST
+        assert resp3.data['status'] == 'ALREADY_REJECTED'
+
+    def test_commit_stock_sale_unreserved_protects_active_reservations(self, store_context):
+        """Item 4: commit_stock_sale with is_reservation=False checks available stock and does not deduct reserved stock."""
+        from apps.inventory.services import commit_stock_sale, reserve_stock, InsufficientStockError
+        from apps.inventory.models import InventoryBalance
+
+        store = store_context['store']
+        warehouse = store_context['warehouse']
+        variant = store_context['variant']
+
+        # Stock state: 10 on hand, 8 reserved for Order A (2 available)
+        bal = InventoryBalance.objects.get(store=store, warehouse=warehouse, variant=variant)
+        bal.on_hand_quantity = 10
+        bal.reserved_quantity = 8
+        bal.save()
+
+        assert bal.available == 2
+
+        # Direct sale of 2 units without reservation should succeed
+        commit_stock_sale(store, warehouse, variant, quantity=2, is_reservation=False)
+        bal.refresh_from_db()
+        assert bal.on_hand_quantity == 8
+        assert bal.reserved_quantity == 8  # Order A's reservation remains completely protected!
+        assert bal.available == 0
+
+        # Attempting another direct sale when available is 0 must raise InsufficientStockError
+        with pytest.raises(InsufficientStockError) as exc:
+            commit_stock_sale(store, warehouse, variant, quantity=1, is_reservation=False)
+        assert "موجودی آزاد" in str(exc.value)
+
+    def test_create_order_item_and_discount_validations(self, store_context):
+        """Item 5: create_order validates item discounts and total discount upfront without reserving stock."""
+        store = store_context['store']
+        warehouse = store_context['warehouse']
+        variant = store_context['variant']
+        bal = InventoryBalance.objects.get(store=store, warehouse=warehouse, variant=variant)
+        initial_reserved = bal.reserved_quantity
+
+        # 1. Unit discount > unit price must fail upfront
+        with pytest.raises(ValueError) as exc1:
+            create_order(
+                store=store,
+                customer_data={'phone': '09123334455', 'name': 'Disc Cust'},
+                items_data=[{
+                    'variant_id': str(variant.id),
+                    'quantity': 2,
+                    'unit_price': 100000,
+                    'unit_discount': 150000  # Invalid! Greater than unit_price
+                }],
+                warehouse=warehouse
+            )
+        assert "تخفیف ردیف کالا" in str(exc1.value)
+
+        # Inventory must NOT have been reserved
+        bal.refresh_from_db()
+        assert bal.reserved_quantity == initial_reserved
+
+        # 2. Total order discount > items + shipping must fail upfront
+        with pytest.raises(ValueError) as exc2:
+            create_order(
+                store=store,
+                customer_data={'phone': '09123334455', 'name': 'Disc Cust'},
+                items_data=[{
+                    'variant_id': str(variant.id),
+                    'quantity': 1,
+                    'unit_price': 100000,
+                    'unit_discount': 0
+                }],
+                warehouse=warehouse,
+                shipping_cost=Decimal('20000'),
+                discount_amount=Decimal('150000')  # 150,000 > 100,000 + 20,000
+            )
+        assert "مبلغ تخفیف سفارش" in str(exc2.value)
+
+        bal.refresh_from_db()
+        assert bal.reserved_quantity == initial_reserved
+
+    def test_create_order_retries_on_order_number_collision(self, store_context):
+        """Item 6: create_order retries with savepoint on IntegrityError collision without crashing."""
+        from django.db import IntegrityError
+        store = store_context['store']
+        warehouse = store_context['warehouse']
+        variant = store_context['variant']
+
+        # Pre-create an order
+        existing_order = Order.objects.create(
+            store=store,
+            order_number="ORD-COLLIDE-TEST",
+            customer=store_context['customer'],
+            warehouse=warehouse,
+            grand_total=Decimal('50000')
+        )
+
+        attempts = [0]
+        original_gen = generate_order_number
+
+        def colliding_generator(st):
+            attempts[0] += 1
+            if attempts[0] == 1:
+                return "ORD-COLLIDE-TEST"  # Force collision on 1st attempt
+            return original_gen(st)
+
+        with patch('apps.orders.services.generate_order_number', side_effect=colliding_generator):
+            order = create_order(
+                store=store,
+                customer_data={'phone': '09128887766', 'name': 'Collision User'},
+                items_data=[{
+                    'variant_id': str(variant.id),
+                    'quantity': 1,
+                    'unit_price': 100000
+                }],
+                warehouse=warehouse
+            )
+
+        assert order is not None
+        assert order.order_number != "ORD-COLLIDE-TEST"
+        assert attempts[0] >= 2
+
+    def test_deeply_nested_payload_sanitization(self):
+        """Item 8: sanitize_payload handles deeply nested lists, tuples, and dicts."""
+        payload = {
+            'action': 'DISPATCH',
+            'nested_lists': [
+                ['09121112233', 'public_text'],
+                [{'api_key': 'SECRET_123', 'phone': '09351234567'}],
+                ('tuple_item', '09198765432')
+            ],
+            'meta': {
+                'auth': {'credentials': {'token': 'SECRET_TOKEN'}},
+                'deep_phones': [{'contact': '09101234567'}]
+            }
+        }
+
+        sanitized = sanitize_payload(payload)
+        # Lists and tuples
+        assert sanitized['nested_lists'][0][0] == '0912****233'
+        assert sanitized['nested_lists'][0][1] == 'public_text'
+        assert sanitized['nested_lists'][1][0]['api_key'] == '***REDACTED***'
+        assert sanitized['nested_lists'][1][0]['phone'] == '0935****567'
+        assert sanitized['nested_lists'][2][1] == '0919****432'
+        # Nested dicts
+        assert sanitized['meta']['auth']['credentials'] == '***REDACTED***'
+        assert sanitized['meta']['deep_phones'][0]['contact'] == '0910****567'

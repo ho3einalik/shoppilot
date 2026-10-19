@@ -79,24 +79,22 @@ def execute_actions(rule, actions, payload, dry_run=False):
 SENSITIVE_KEYS = {'password', 'token', 'secret', 'api_key', 'authorization', 'card_number', 'cvv2', 'credentials'}
 
 def sanitize_payload(payload):
-    """Sanitizes sensitive information from event payload before storing in execution logs"""
-    if not isinstance(payload, dict):
+    """Sanitizes sensitive information (tokens, secrets, credentials, phone numbers) deeply from event payload before storing in execution logs"""
+    if isinstance(payload, dict):
+        sanitized = {}
+        for k, v in payload.items():
+            if any(sens in str(k).lower() for sens in SENSITIVE_KEYS):
+                sanitized[k] = '***REDACTED***'
+            else:
+                sanitized[k] = sanitize_payload(v)
+        return sanitized
+    elif isinstance(payload, (list, tuple)):
+        return [sanitize_payload(item) for item in payload]
+    elif isinstance(payload, str):
+        if len(payload) == 11 and payload.startswith('09') and payload.isdigit():
+            return payload[:4] + '****' + payload[-3:]
         return payload
-
-    sanitized = {}
-    for k, v in payload.items():
-        if any(sens in k.lower() for sens in SENSITIVE_KEYS):
-            sanitized[k] = '***REDACTED***'
-        elif isinstance(v, dict):
-            sanitized[k] = sanitize_payload(v)
-        elif isinstance(v, list):
-            sanitized[k] = [sanitize_payload(i) if isinstance(i, dict) else i for i in v]
-        elif isinstance(v, str) and len(v) == 11 and v.startswith('09'):
-            # Mask phone numbers in payload logs
-            sanitized[k] = v[:4] + '****' + v[-3:]
-        else:
-            sanitized[k] = v
-    return sanitized
+    return payload
 
 
 from django.db import transaction, IntegrityError

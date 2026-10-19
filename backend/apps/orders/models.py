@@ -15,7 +15,7 @@ class Customer(TenantScopedModel):
     city = models.CharField(max_length=100, blank=True, verbose_name="شهر")
     postal_code = models.CharField(max_length=20, blank=True, verbose_name="کد پستی")
     address_line = models.TextField(blank=True, verbose_name="نشانی کامل")
-    marketing_opt_in = models.BooleanField(default=True, verbose_name="موافقت با دریافت پیام‌های بازاریابی")
+    marketing_opt_in = models.BooleanField(default=False, verbose_name="موافقت با دریافت پیام‌های بازاریابی")
 
     class Meta:
         verbose_name = 'مشتری'

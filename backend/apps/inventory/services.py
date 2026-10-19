@@ -88,25 +88,46 @@ def release_stock_reservation(store, warehouse, variant, quantity, reference='',
     return balance
 
 @transaction.atomic
-def commit_stock_sale(store, warehouse, variant, quantity, reference='', user=None):
-    """Convert reservation to actual sale deduction from on_hand_quantity with strict inventory check"""
+def commit_stock_sale(store, warehouse, variant, quantity, reference='', user=None, is_reservation=True):
+    """
+    Deducts stock for an actual sale with strict inventory check.
+    If is_reservation=True (default for fulfilling previously reserved orders):
+        - strictly verifies on_hand_quantity >= quantity
+        - deducts min(quantity, reserved_quantity) from reserved_quantity
+        - deducts quantity from on_hand_quantity
+    If is_reservation=False (for direct/walk-in sales or exchange returns without prior reservation):
+        - strictly verifies available unreserved stock (available >= quantity)
+        - deducts quantity from on_hand_quantity ONLY, protecting other orders' reserved stock
+    """
     if quantity <= 0:
         return None
 
     balance = get_or_create_balance(store, warehouse, variant)
 
-    # Strictly verify on-hand quantity: NEVER silently clamp to zero
-    if balance.on_hand_quantity < quantity:
-        raise InsufficientStockError(
-            f"موجودی فیزیکی در انبار {warehouse.name} برای {variant.sku} کافی نیست. "
-            f"موجودی موجود: {balance.on_hand_quantity}، مقدار درخواستی: {quantity}"
-        )
+    if is_reservation:
+        # Strictly verify on-hand quantity: NEVER silently clamp to zero
+        if balance.on_hand_quantity < quantity:
+            raise InsufficientStockError(
+                f"موجودی فیزیکی در انبار {warehouse.name} برای {variant.sku} کافی نیست. "
+                f"موجودی موجود: {balance.on_hand_quantity}، مقدار درخواستی: {quantity}"
+            )
 
-    # Deduct from reservation if available
-    reserved_deduct = min(quantity, balance.reserved_quantity)
-    balance.reserved_quantity -= reserved_deduct
-    balance.on_hand_quantity -= quantity
-    balance.save()
+        # Deduct from reservation if available
+        reserved_deduct = min(quantity, balance.reserved_quantity)
+        balance.reserved_quantity -= reserved_deduct
+        balance.on_hand_quantity -= quantity
+        balance.save()
+        movement_reason = f"تحویل سفارش {reference}"
+    else:
+        # Unreserved sale: must verify available stock (on_hand - reserved)
+        if balance.available < quantity:
+            raise InsufficientStockError(
+                f"موجودی آزاد در انبار {warehouse.name} برای {variant.sku} کافی نیست. "
+                f"موجودی آزاد: {balance.available} (کل: {balance.on_hand_quantity}، رزرو شده: {balance.reserved_quantity})، مقدار درخواستی: {quantity}"
+            )
+        balance.on_hand_quantity -= quantity
+        balance.save()
+        movement_reason = f"فروش مستقیم/تعویض کالا {reference}"
 
     InventoryMovement.objects.create(
         store=store,
@@ -116,7 +137,7 @@ def commit_stock_sale(store, warehouse, variant, quantity, reference='', user=No
         quantity=-quantity,
         balance_after=balance.on_hand_quantity,
         reference=reference,
-        reason=f"تحویل سفارش {reference}",
+        reason=movement_reason,
         user=user
     )
     return balance

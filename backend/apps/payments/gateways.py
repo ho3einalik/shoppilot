@@ -77,6 +77,15 @@ class BasePaymentGateway(ABC):
         """Server-to-server payment verification"""
         pass
 
+    @abstractmethod
+    def refund_payment(self, authority: str, amount: Decimal, store=None, currency: str = 'IRT') -> GatewayPaymentResult:
+        """Server-to-server payment refund/reverse"""
+        pass
+
+    def has_refund_credentials(self, store=None) -> bool:
+        """Check if gateway has credentials configured for refunds"""
+        return False
+
 
 class ZarinpalGatewayAdapter(BasePaymentGateway):
     gateway_name = "zarinpal"
@@ -234,6 +243,97 @@ class ZarinpalGatewayAdapter(BasePaymentGateway):
                 success=False,
                 status='COMMUNICATION_ERROR',
                 message=f"خطا در استعلام از درگاه پرداخت: {str(e)}"
+            )
+
+    def has_refund_credentials(self, store=None) -> bool:
+        merchant_id = self._get_merchant_id(store)
+        cfg = self._get_config(store)
+        access_token = cfg.get('access_token') or os.environ.get('ZARINPAL_ACCESS_TOKEN')
+        return bool(merchant_id and access_token)
+
+    def refund_payment(self, authority: str, amount: Decimal, store=None, currency: str = 'IRT') -> GatewayPaymentResult:
+        merchant_id = self._get_merchant_id(store)
+        if not merchant_id:
+            return GatewayPaymentResult(
+                success=False,
+                status='REQUIRES_GATEWAY_CONFIG',
+                message='مرچنت زرین‌پال در تنظیمات فروشگاه یا متغیرهای سیستمی پیکربندی نشده است.'
+            )
+
+        cfg = self._get_config(store)
+        access_token = cfg.get('access_token') or os.environ.get('ZARINPAL_ACCESS_TOKEN')
+        if not access_token:
+            return GatewayPaymentResult(
+                success=False,
+                status='REQUIRES_GATEWAY_CONFIG',
+                message='توکن دسترسی درگاه (Access Token) جهت استرداد آنلاین خودکار از طریق زرین‌پال پیکربندی نشده است. برای ثبت استرداد می‌توانید از گزینه استرداد دستی استفاده نمایید.'
+            )
+
+        try:
+            gateway_amount = validate_and_convert_to_gateway_amount(amount, currency)
+        except ValidationError as e:
+            return GatewayPaymentResult(
+                success=False,
+                status='INVALID_AMOUNT',
+                message=str(e.detail[0]) if hasattr(e, 'detail') and isinstance(e.detail, list) else str(e)
+            )
+
+        prefix = "sandbox" if self._is_sandbox(store) else "api"
+        url = f"https://{prefix}.zarinpal.com/pg/v4/payment/refund.json"
+        payload = {
+            'merchant_id': merchant_id,
+            'authority': authority,
+            'amount': gateway_amount
+        }
+
+        try:
+            req = urllib.request.Request(
+                url,
+                data=json.dumps(payload).encode('utf-8'),
+                headers={
+                    'Content-Type': 'application/json',
+                    'Authorization': f"Bearer {access_token}"
+                },
+                method='POST'
+            )
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                data = json.loads(resp.read().decode('utf-8'))
+                res_data = data.get('data', {})
+                code = res_data.get('code')
+                ref_id = str(res_data.get('ref_id') or res_data.get('session_id') or '')
+                if code in (100, 101):
+                    return GatewayPaymentResult(
+                        success=True,
+                        status='REFUNDED',
+                        tracking_code=ref_id,
+                        message='استرداد وجه با موفقیت از طریق درگاه زرین‌پال انجام شد.',
+                        raw_response=data
+                    )
+                errors = data.get('errors')
+                msg = str(errors) if errors else f"کد پاسخ درگاه: {code}"
+                return GatewayPaymentResult(
+                    success=False,
+                    status='REJECTED_BY_GATEWAY',
+                    message=f"درگاه زرین‌پال درخواست استرداد را تایید نکرد: {msg}",
+                    raw_response=data
+                )
+        except urllib.error.HTTPError as e:
+            try:
+                err_body = json.loads(e.read().decode('utf-8'))
+                msg = str(err_body.get('errors') or err_body)
+            except Exception:
+                msg = str(e)
+            return GatewayPaymentResult(
+                success=False,
+                status='COMMUNICATION_ERROR',
+                message=f"خطای سرویس استرداد زرین‌پال: {msg}"
+            )
+        except Exception as e:
+            logger.error(f"Zarinpal refund failed: {e}")
+            return GatewayPaymentResult(
+                success=False,
+                status='COMMUNICATION_ERROR',
+                message=f"خطا در ارتباط با سرویس استرداد زرین‌پال: {str(e)}"
             )
 
 
