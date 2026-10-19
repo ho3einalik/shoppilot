@@ -250,7 +250,7 @@ class TestProductionHardeningAndIntegrity:
         # 3. SQLite in production without ALLOW_SQLITE_IN_PRODUCTION must fail
         cmd_sqlite = [
             sys.executable, "-c",
-            "import os; os.environ['DJANGO_DEBUG']='False'; os.environ['DJANGO_SECRET_KEY']='strong-secret-key-32-chars-long-123456'; os.environ['DJANGO_ALLOWED_HOSTS']='api.shoppilot.ir'; import config.settings"
+            "import os; os.environ.pop('DB_HOST', None); os.environ.pop('DATABASE_URL', None); os.environ['DJANGO_DEBUG']='False'; os.environ['DJANGO_SECRET_KEY']='strong-secret-key-32-chars-long-123456'; os.environ['DJANGO_ALLOWED_HOSTS']='api.shoppilot.ir'; import config.settings"
         ]
         proc3 = subprocess.run(cmd_sqlite, capture_output=True, text=True, cwd=backend_dir)
         assert proc3.returncode != 0
