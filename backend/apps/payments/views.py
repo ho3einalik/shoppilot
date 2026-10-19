@@ -153,7 +153,10 @@ class PaymentTransactionViewSet(viewsets.ModelViewSet):
                 sp.save(update_fields=['status', 'rejection_reason', 'updated_at'])
 
             verified_sum = sum(
-                p.amount for p in order.payments.filter(status=PaymentVerificationStatus.VERIFIED)
+                max(Decimal('0'), p.amount - (getattr(p, 'refunded_amount', Decimal('0')) or Decimal('0')))
+                for p in order.payments.filter(
+                    status__in=[PaymentVerificationStatus.VERIFIED, PaymentVerificationStatus.REFUNDED]
+                )
             )
             pending_sum = sum(
                 p.amount for p in order.payments.filter(

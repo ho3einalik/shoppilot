@@ -28,6 +28,10 @@ app.conf.beat_schedule = {
         'task': 'payments.reconcile_pending_online_payments_task',
         'schedule': 600.0,  # Every 10 minutes
     },
+    'payments-retry-pending-overpayment-refunds': {
+        'task': 'payments.retry_pending_overpayment_refunds_task',
+        'schedule': 900.0,  # Every 15 minutes
+    },
 }
 
 @app.task(bind=True, ignore_result=True)

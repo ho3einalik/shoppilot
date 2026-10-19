@@ -69,7 +69,11 @@ def execute_actions(rule, actions, payload, dry_run=False):
             elif phone:
                 sms_adapter = get_integration_adapter('sms_gateway')
                 sms_res = sms_adapter.send_sms(to=phone, message=template, store=store)
-                results.append(f"پیامک به شماره {phone} ارسال شد (وضعیت: {sms_res.get('status')}).")
+                status_code = sms_res.get('status')
+                if status_code in ['FAILED', 'ERROR']:
+                    err = sms_res.get('error') or sms_res.get('message') or 'خطای درگاه پیامک'
+                    raise RuntimeError(f"ارسال پیامک به {phone} با خطا مواجه شد: {err}")
+                results.append(f"پیامک به شماره {phone} ارسال شد (وضعیت: {status_code}).")
             else:
                 results.append("شماره تلفنی در داده‌های رویداد برای ارسال پیامک یافت نشد.")
 
@@ -105,11 +109,12 @@ def sanitize_payload(payload):
 from django.db import transaction, IntegrityError
 
 
-def trigger_automation(store, trigger_event, payload, dry_run=False):
-    """Trigger all active rules matching the event for a store with atomic idempotency claims"""
+def trigger_automation(store, trigger_event, payload, dry_run=False, raise_on_failure=False):
+    """Trigger all active rules matching the event for a store with atomic idempotency claims and retry support"""
     rules = AutomationRule.objects.filter(store=store, trigger=trigger_event, is_active=True)
     executed_count = 0
     sanitized_data = sanitize_payload(payload)
+    errors = []
 
     for rule in rules:
         matches = evaluate_conditions(rule.conditions, payload)
@@ -132,22 +137,34 @@ def trigger_automation(store, trigger_event, payload, dry_run=False):
             executed_count += 1
             continue
 
-        # Atomic claim under concurrency
+        # Atomic claim under concurrency with idempotency:
+        # If an execution log already exists for this rule and key:
+        # - If already SUCCESS: skip (prevent duplicate execution)
+        # - If FAILED or RUNNING: allow retry by updating the record
         log_entry = None
         if event_key:
-            try:
-                with transaction.atomic():
-                    log_entry = AutomationExecutionLog.objects.create(
-                        rule=rule,
-                        idempotency_key=str(event_key),
-                        trigger_event=trigger_event,
-                        event_payload=sanitized_data,
-                        status=ExecutionStatus.RUNNING,
-                        details="در حال اجرای اقدامات..."
-                    )
-            except IntegrityError:
-                # Concurrent worker already claimed or completed this rule for this idempotency key
-                continue
+            existing_log = AutomationExecutionLog.objects.filter(rule=rule, idempotency_key=str(event_key)).first()
+            if existing_log:
+                if existing_log.status == ExecutionStatus.SUCCESS:
+                    continue
+                log_entry = existing_log
+                log_entry.status = ExecutionStatus.RUNNING
+                log_entry.details = "در حال تلاش مجدد برای اجرای اقدامات..."
+                log_entry.save(update_fields=['status', 'details'])
+            else:
+                try:
+                    with transaction.atomic():
+                        log_entry = AutomationExecutionLog.objects.create(
+                            rule=rule,
+                            idempotency_key=str(event_key),
+                            trigger_event=trigger_event,
+                            event_payload=sanitized_data,
+                            status=ExecutionStatus.RUNNING,
+                            details="در حال اجرای اقدامات..."
+                        )
+                except IntegrityError:
+                    # Concurrent worker already claimed or completed this rule for this idempotency key
+                    continue
         else:
             log_entry = AutomationExecutionLog.objects.create(
                 rule=rule,
@@ -171,6 +188,10 @@ def trigger_automation(store, trigger_event, payload, dry_run=False):
             log_entry.status = ExecutionStatus.FAILED
             log_entry.details = f"خطا در اجرای اقدامات: {str(e)}"
             log_entry.save(update_fields=['status', 'details'])
+            errors.append(f"قانون '{rule.name}' با خطا مواجه شد: {str(e)}")
+
+    if raise_on_failure and errors:
+        raise RuntimeError(" | ".join(errors))
 
     return executed_count
 
@@ -225,7 +246,8 @@ def process_outbox_event(event_id):
             store=event.store,
             trigger_event=event.event_type,
             payload=event.payload,
-            dry_run=False
+            dry_run=False,
+            raise_on_failure=True
         )
         event.status = OutboxStatus.DELIVERED
         event.processed_at = timezone.now()

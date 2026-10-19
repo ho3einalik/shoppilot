@@ -1367,7 +1367,7 @@ class TestFiveSeniorAuditRemediations:
         verified_p1 = verify_payment_transaction(p1, user=None)
 
         assert verified_p1.status == PaymentVerificationStatus.VERIFIED
-        assert "[اضافه پرداخت]" in verified_p1.rejection_reason
+        assert "اضافه پرداخت" in verified_p1.rejection_reason
         assert "100,000" in verified_p1.rejection_reason
         order.refresh_from_db()
         assert order.payment_status == PaymentStatus.PAID
@@ -1493,5 +1493,212 @@ class TestFiveSeniorAuditRemediations:
         assert bulk_count == 1
         replayed.refresh_from_db()
         assert replayed.status == OutboxStatus.PENDING
+
+    # =========================================================================
+    # ITEM 1 TEST: Outbox action failure must NOT mark DELIVERED and must retry
+    # =========================================================================
+    def test_outbox_action_failure_triggers_retry_not_delivered(self, store_env):
+        """If an action (e.g. SMS) fails, OutboxEvent must NOT become DELIVERED; it must stay PENDING and retry."""
+        from apps.automation.models import TriggerEvent, OutboxEvent, OutboxStatus, AutomationRule
+        from apps.automation.services import process_outbox_event
+        from apps.features.adapters import SMSGatewayIntegrationAdapter
+        from unittest.mock import patch
+        store = store_env['store']
+
+        # Rule that executes SEND_SMS
+        AutomationRule.objects.create(
+            store=store,
+            name="SMS Notification Rule",
+            trigger=TriggerEvent.ORDER_PAID,
+            actions=[{'type': 'SEND_SMS', 'template': 'Your order is paid'}]
+        )
+
+        event = OutboxEvent.objects.create(
+            store=store,
+            event_type=TriggerEvent.ORDER_PAID,
+            payload={'order_id': 'ORD-999', 'customer_phone': '09121112233', 'idempotency_key': 'sms_ev_1'},
+            status=OutboxStatus.PENDING,
+            max_retries=3
+        )
+
+        # 1. Simulate SMS delivery failure
+        with patch.object(SMSGatewayIntegrationAdapter, 'send_sms', return_value={'status': 'FAILED', 'error': 'Network timeout'}):
+            res_ev = process_outbox_event(event.id)
+            assert res_ev.status == OutboxStatus.PENDING
+            assert res_ev.retry_count == 1
+            assert "Network timeout" in res_ev.last_error
+
+        # 2. Simulate subsequent recovery
+        with patch.object(SMSGatewayIntegrationAdapter, 'send_sms', return_value={'status': 'SENT', 'message_id': 'M123'}):
+            res_ev2 = process_outbox_event(event.id)
+            assert res_ev2.status == OutboxStatus.DELIVERED
+            assert res_ev2.last_error == ''
+
+    # =========================================================================
+    # ITEM 2 TEST: Net verified calculation on partial refund & overpayment retry
+    # =========================================================================
+    def test_partial_refund_net_verified_calculation(self, store_env):
+        """verify_payment_transaction must use net verified payments (amount - refunded_amount)."""
+        from apps.orders.models import Order, PaymentStatus
+        from apps.payments.models import PaymentTransaction, PaymentVerificationStatus, PaymentMethod
+        from apps.payments.services import verify_payment_transaction, process_payment_refund
+        store = store_env['store']
+        customer = store_env['customer']
+        warehouse = store_env['warehouse']
+
+        order = Order.objects.create(
+            store=store,
+            customer=customer,
+            warehouse=warehouse,
+            order_number="ORD-NET-VERIFY",
+            grand_total=Decimal('100000'),
+            payment_status=PaymentStatus.PENDING
+        )
+
+        # Payment 1: 70,000 verified
+        p1 = PaymentTransaction.objects.create(
+            store=store,
+            order=order,
+            method=PaymentMethod.ONLINE_GATEWAY,
+            amount=Decimal('70000'),
+            status=PaymentVerificationStatus.PENDING_VERIFICATION
+        )
+        verify_payment_transaction(p1, user=None)
+
+        # Partial refund of 30,000 on Payment 1 (net remaining on p1 is 40,000)
+        process_payment_refund(p1, amount=Decimal('30000'), reason="Partial item cancel", user=None, is_manual=True)
+        p1.refresh_from_db()
+        assert p1.status == PaymentVerificationStatus.VERIFIED
+        assert p1.refunded_amount == Decimal('30000')
+
+        # Payment 2: 60,000. Net was 40,000, so 40,000 + 60,000 = 100,000 (EXACT grand_total)
+        p2 = PaymentTransaction.objects.create(
+            store=store,
+            order=order,
+            method=PaymentMethod.ONLINE_GATEWAY,
+            amount=Decimal('60000'),
+            status=PaymentVerificationStatus.PENDING_VERIFICATION
+        )
+        verify_payment_transaction(p2, user=None)
+
+        p2.refresh_from_db()
+        assert p2.status == PaymentVerificationStatus.VERIFIED
+        # Must NOT be marked as overpayment!
+        assert "[اضافه پرداخت]" not in (p2.rejection_reason or '')
+        order.refresh_from_db()
+        assert order.payment_status == PaymentStatus.PAID
+
+    def test_overpayment_failed_refund_queued_and_retried(self, store_env):
+        """Failed initial overpayment refund is queued and resolved by background retry service."""
+        from apps.orders.models import Order, PaymentStatus
+        from apps.payments.models import PaymentTransaction, PaymentVerificationStatus, PaymentMethod
+        from apps.payments.services import verify_payment_transaction, retry_pending_overpayment_refunds
+        from unittest.mock import patch
+        store = store_env['store']
+        customer = store_env['customer']
+        warehouse = store_env['warehouse']
+
+        order = Order.objects.create(
+            store=store,
+            customer=customer,
+            warehouse=warehouse,
+            order_number="ORD-OVERPAY-RETRY",
+            grand_total=Decimal('100000'),
+            payment_status=PaymentStatus.PENDING
+        )
+
+        # Payment 1: 100,000 verified
+        p1 = PaymentTransaction.objects.create(
+            store=store,
+            order=order,
+            method=PaymentMethod.ONLINE_GATEWAY,
+            amount=Decimal('100000'),
+            status=PaymentVerificationStatus.PENDING_VERIFICATION
+        )
+        verify_payment_transaction(p1, user=None)
+
+        # Payment 2: 50,000 (overpayment of 50,000)
+        p2 = PaymentTransaction.objects.create(
+            store=store,
+            order=order,
+            method=PaymentMethod.ONLINE_GATEWAY,
+            amount=Decimal('50000'),
+            status=PaymentVerificationStatus.PENDING_VERIFICATION
+        )
+
+        # Mock initial process_payment_refund to fail
+        with patch('apps.payments.services.process_payment_refund', side_effect=RuntimeError("Gateway timeout on refund")):
+            verify_payment_transaction(p2, user=None)
+
+        p2.refresh_from_db()
+        assert p2.status == PaymentVerificationStatus.VERIFIED
+        assert "[اضافه پرداخت - استرداد ناموفق/معلق]" in p2.rejection_reason
+        assert p2.refunded_amount == Decimal('0')
+
+        # Now run background retry job with working refund
+        res = retry_pending_overpayment_refunds(store=store)
+        assert res['attempted'] == 1
+        assert res['succeeded'] == 1
+
+        p2.refresh_from_db()
+        assert p2.refunded_amount == Decimal('50000')
+
+    # =========================================================================
+    # ITEM 3 TEST: RBAC permissions on Outbox Replay
+    # =========================================================================
+    def test_outbox_replay_rbac_permission_enforcement(self, store_env):
+        """Outbox replay endpoints reject non-manager roles with 403 Forbidden."""
+        from rest_framework.test import APIRequestFactory, force_authenticate
+        from apps.automation.models import OutboxEvent, OutboxStatus
+        from apps.automation.views import OutboxEventViewSet
+        from apps.tenancy.models import StoreMembership, Role
+        from django.contrib.auth import get_user_model
+        User = get_user_model()
+
+        store = store_env['store']
+        owner = store_env['user']
+
+        event = OutboxEvent.objects.create(
+            store=store,
+            event_type="TEST_RBAC",
+            payload={'a': 1},
+            status=OutboxStatus.DEAD_LETTER
+        )
+
+        # Create non-manager user (support)
+        support_user = User.objects.create_user(phone_number='09129998877', full_name='Shop Support')
+        mem_support = StoreMembership.objects.create(user=support_user, store=store, role=Role.SUPPORT)
+
+        factory = APIRequestFactory()
+        view = OutboxEventViewSet.as_view({'post': 'replay'})
+
+        # 1. Support user attempts to replay -> 403 Forbidden
+        req_supp = factory.post(f'/api/v1/automation/outbox/{event.id}/replay/')
+        req_supp.store = store
+        req_supp.membership = mem_support
+        force_authenticate(req_supp, user=support_user)
+
+        resp_supp = view(req_supp, pk=str(event.id))
+        assert resp_supp.status_code == 403
+
+        # 2. Owner attempts to replay -> 200 OK
+        mem_owner = StoreMembership.objects.filter(user=owner, store=store).first()
+        req_owner = factory.post(f'/api/v1/automation/outbox/{event.id}/replay/')
+        req_owner.store = store
+        req_owner.membership = mem_owner
+        force_authenticate(req_owner, user=owner)
+
+        resp_owner = view(req_owner, pk=str(event.id))
+        assert resp_owner.status_code == 200
+
+        # 3. Support user attempts bulk replay -> 403 Forbidden
+        view_bulk = OutboxEventViewSet.as_view({'post': 'replay_dead_letters'})
+        req_bulk_supp = factory.post('/api/v1/automation/outbox/replay-dead-letters/')
+        req_bulk_supp.store = store
+        req_bulk_supp.membership = mem_support
+        force_authenticate(req_bulk_supp, user=support_user)
+
+        resp_bulk_supp = view_bulk(req_bulk_supp)
+        assert resp_bulk_supp.status_code == 403
 
 

@@ -12,33 +12,38 @@ def verify_payment_transaction(payment, user):
     if payment.status == PaymentVerificationStatus.VERIFIED:
         return payment
 
-    # Lock order and check total verified payments to prevent overpayment race conditions
+    # Lock order and check total net verified payments (amount - refunded_amount) to prevent overpayment race conditions
     order = Order.objects.select_for_update().get(id=payment.order_id)
     total_verified = sum(
-        p.amount for p in order.payments.filter(status=PaymentVerificationStatus.VERIFIED).exclude(id=payment.id)
+        max(Decimal('0'), p.amount - (getattr(p, 'refunded_amount', Decimal('0')) or Decimal('0')))
+        for p in order.payments.filter(
+            status__in=[PaymentVerificationStatus.VERIFIED, PaymentVerificationStatus.REFUNDED]
+        ).exclude(id=payment.id)
     )
 
     from .models import PaymentMethod
     is_online = payment.method == PaymentMethod.ONLINE_GATEWAY
-    is_overpayment = (total_verified + payment.amount) > order.grand_total
+    curr_refunded = getattr(payment, 'refunded_amount', Decimal('0')) or Decimal('0')
+    payment_net = max(Decimal('0'), payment.amount - curr_refunded)
+    is_overpayment = (total_verified + payment_net) > order.grand_total
 
     if is_overpayment and not is_online:
         from rest_framework.exceptions import ValidationError
         raise ValidationError(
-            f"تأیید این تراکنش باعث پرداخت بیش از سقف سفارش خواهد شد. مجموع تأییدشده: {total_verified}، تراکنش فعلی: {payment.amount}، مبلغ کل: {order.grand_total}"
+            f"تأیید این تراکنش باعث پرداخت بیش از سقف سفارش خواهد شد. مجموع تأییدشده خالص: {total_verified}، تراکنش فعلی: {payment.amount}، مبلغ کل: {order.grand_total}"
         )
 
-    excess_amount = max(Decimal('0'), (total_verified + payment.amount) - order.grand_total)
+    excess_amount = max(Decimal('0'), (total_verified + payment_net) - order.grand_total)
 
     payment.status = PaymentVerificationStatus.VERIFIED
     payment.verified_by = user
     payment.verified_at = timezone.now()
     if excess_amount > 0:
-        overpay_note = f"[اضافه پرداخت] مبلغ {excess_amount:,.0f} {payment.currency} مازاد بر مبلغ کل سفارش پرداخت شده است (تأیید دیرهنگام تراکنش). نیازمند استرداد وجه."
+        overpay_note = f"[اضافه پرداخت معلق] مبلغ {excess_amount:,.0f} {payment.currency} مازاد بر مبلغ کل سفارش پرداخت شده است (تأیید دیرهنگام تراکنش). در انتظار استرداد وجه."
         payment.rejection_reason = f"{payment.rejection_reason} | {overpay_note}" if payment.rejection_reason else overpay_note
     payment.save()
 
-    new_total_verified = total_verified + payment.amount
+    new_total_verified = total_verified + payment_net
     if new_total_verified >= order.grand_total:
         order.payment_status = PaymentStatus.PAID
     elif new_total_verified > 0:
@@ -62,7 +67,7 @@ def verify_payment_transaction(payment, user):
     )
 
     if excess_amount > 0:
-        # Attempt non-blocking automatic refund if gateway refund credentials exist
+        # Attempt automatic refund if gateway refund credentials exist or manual refund can be staged
         try:
             process_payment_refund(
                 payment=payment,
@@ -71,10 +76,13 @@ def verify_payment_transaction(payment, user):
                 user=user,
                 is_manual=None
             )
-        except Exception:
-            # If auto-refund cannot be executed immediately (e.g. gateway refund not configured),
-            # the transaction remains VERIFIED and flagged for manual refund / accounting resolution.
-            pass
+        except Exception as exc:
+            # If auto-refund cannot be executed immediately (e.g. gateway error/missing credentials),
+            # mark as queued for background retry and audit log.
+            payment.refresh_from_db()
+            fail_note = f"[اضافه پرداخت - استرداد ناموفق/معلق] خطا در درگاه: {str(exc)}. در صف تلاش مجدد."
+            payment.rejection_reason = f"{payment.rejection_reason} | {fail_note}" if payment.rejection_reason else fail_note
+            payment.save(update_fields=['rejection_reason'])
 
     if order.payment_status == PaymentStatus.PAID:
         from apps.automation.services import publish_outbox_event
@@ -321,5 +329,63 @@ def reconcile_pending_online_payments(store=None, max_age_hours=24):
         'expired_ids': expired,
         'errors': errors
     }
+
+
+def retry_pending_overpayment_refunds(store=None):
+    """
+    Background reconciliation job for unresolved overpayments.
+    Scans verified transactions with unresolved overpayments and attempts to process refund.
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+
+    qs = PaymentTransaction.objects.filter(
+        status=PaymentVerificationStatus.VERIFIED,
+        rejection_reason__contains="[اضافه پرداخت"
+    ).select_related('order', 'store')
+    if store:
+        qs = qs.filter(store=store)
+
+    results = {'attempted': 0, 'succeeded': 0, 'failed': 0, 'details': []}
+    for payment in qs:
+        try:
+            with transaction.atomic():
+                p = PaymentTransaction.objects.select_for_update().get(id=payment.id)
+                order = Order.objects.select_for_update().get(id=p.order_id)
+                all_payments = order.payments.filter(
+                    status__in=[PaymentVerificationStatus.VERIFIED, PaymentVerificationStatus.REFUNDED]
+                )
+                total_net = sum(
+                    max(Decimal('0'), tx.amount - (getattr(tx, 'refunded_amount', Decimal('0')) or Decimal('0')))
+                    for tx in all_payments
+                )
+                if total_net <= order.grand_total:
+                    continue
+
+                excess_remaining = total_net - order.grand_total
+                curr_refunded = getattr(p, 'refunded_amount', Decimal('0')) or Decimal('0')
+                refundable_on_this_tx = max(Decimal('0'), p.amount - curr_refunded)
+                amount_to_refund = min(excess_remaining, refundable_on_this_tx)
+
+                if amount_to_refund <= Decimal('0'):
+                    continue
+
+                results['attempted'] += 1
+                process_payment_refund(
+                    payment=p,
+                    amount=amount_to_refund,
+                    reason="استرداد دوره‌ای اضافه پرداخت سفارش از صف پس‌زمینه",
+                    user=None,
+                    is_manual=None
+                )
+                results['succeeded'] += 1
+                results['details'].append({'payment_id': str(p.id), 'amount': str(amount_to_refund), 'status': 'SUCCESS'})
+                logger.info("Successfully retried overpayment refund for payment %s (amount %s)", p.id, amount_to_refund)
+        except Exception as exc:
+            results['failed'] += 1
+            results['details'].append({'payment_id': str(payment.id), 'status': 'FAILED', 'error': str(exc)})
+            logger.warning("Retry refund for overpayment %s failed: %s", payment.id, exc)
+
+    return results
 
 

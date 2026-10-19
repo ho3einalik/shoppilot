@@ -40,6 +40,10 @@ class AutomationRuleViewSet(viewsets.ModelViewSet):
         })
 
 
+from apps.tenancy.models import Role
+from apps.tenancy.permissions import IsStoreMemberPermission, user_has_store_permission
+
+
 class OutboxEventViewSet(viewsets.ReadOnlyModelViewSet):
     serializer_class = OutboxEventSerializer
     permission_classes = [permissions.IsAuthenticated, IsStoreMemberPermission]
@@ -56,6 +60,19 @@ class OutboxEventViewSet(viewsets.ReadOnlyModelViewSet):
 
     @action(detail=True, methods=['post'], url_path='replay')
     def replay(self, request, pk=None):
+        membership = getattr(request, 'membership', None)
+        is_allowed = request.user.is_superuser or (
+            membership and (
+                membership.role in [Role.OWNER, Role.ADMIN, Role.BUSINESS_MANAGER]
+                or user_has_store_permission(membership, 'automation.manage')
+            )
+        )
+        if not is_allowed:
+            return Response(
+                {'detail': 'تنها مدیران فروشگاه مجوز بازپخش رویدادهای صف اتوماسیون را دارند.'},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
         event = self.get_object()
         replayed = replay_outbox_event(event.id)
         return Response({
@@ -65,6 +82,19 @@ class OutboxEventViewSet(viewsets.ReadOnlyModelViewSet):
 
     @action(detail=False, methods=['post'], url_path='replay-dead-letters')
     def replay_dead_letters(self, request):
+        membership = getattr(request, 'membership', None)
+        is_allowed = request.user.is_superuser or (
+            membership and (
+                membership.role in [Role.OWNER, Role.ADMIN]
+                or user_has_store_permission(membership, 'automation.manage')
+            )
+        )
+        if not is_allowed:
+            return Response(
+                {'detail': 'بازپخش گروهی صف بن‌بست (Dead Letter) صرفاً در اختیارات مدیران ارشد فروشگاه است.'},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
         store = getattr(self.request, 'store', None)
         count = replay_all_dead_letter_events(store=store)
         return Response({
