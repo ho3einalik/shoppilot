@@ -209,12 +209,16 @@ def commit_stock_sale(store, warehouse, variant, quantity, reference='', user=No
                     )
                 balance.on_hand_quantity -= quantity
         else:
-            # No order reference provided: fall back to generic deduction
-            reserved_deduct = min(quantity, balance.reserved_quantity)
-            balance.reserved_quantity = max(0, balance.reserved_quantity - reserved_deduct)
+            # No order reference provided: cannot identify any specific reservation.
+            # Must verify available unreserved stock to prevent stealing other orders' reservations.
+            if balance.available < quantity:
+                raise InsufficientStockError(
+                    f"شناسه سفارش مشخص نشده است و موجودی آزاد انبار ({balance.available}) کمتر از مقدار درخواستی ({quantity}) است. "
+                    f"رزروهای موجود متعلق به سایر سفارش‌ها هستند و بدون مشخص کردن شناسه سفارش امکان مصرف آن‌ها وجود ندارد."
+                )
             balance.on_hand_quantity -= quantity
 
-        movement_reason = f"تحویل سفارش {reference}"
+        movement_reason = f"تحویل سفارش {reference}" if reference else "فروش بدون شناسه سفارش"
     else:
         # Unreserved direct sale: must verify available stock (on_hand - reserved - quarantined)
         if balance.available < quantity:

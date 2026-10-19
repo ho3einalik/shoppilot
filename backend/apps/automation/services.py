@@ -235,15 +235,20 @@ def process_outbox_event(event_id):
         event.retry_count += 1
         event.last_error = str(exc)
         if event.retry_count >= event.max_retries:
-            event.status = OutboxStatus.FAILED
+            event.status = OutboxStatus.DEAD_LETTER
             event.next_retry_at = None
+            _logger.critical(
+                "CRITICAL: OutboxEvent %s reached max retries (%d/%d) and moved to DEAD_LETTER queue. "
+                "Event type: %s, payload: %s, error: %s",
+                event_id, event.retry_count, event.max_retries, event.event_type, event.payload, exc
+            )
         else:
             event.status = OutboxStatus.PENDING
             # Exponential backoff: 10s * (2 ** retry_count)
             delay_seconds = 10 * (2 ** (event.retry_count - 1))
             event.next_retry_at = timezone.now() + datetime.timedelta(seconds=delay_seconds)
+            _logger.error("OutboxEvent %s failed (attempt %d/%d): %s", event_id, event.retry_count, event.max_retries, exc)
         event.save(update_fields=['status', 'retry_count', 'last_error', 'next_retry_at', 'updated_at'])
-        _logger.error("OutboxEvent %s failed (attempt %d/%d): %s", event_id, event.retry_count, event.max_retries, exc)
 
     return event
 
@@ -269,5 +274,41 @@ def process_pending_outbox_events(limit=50):
         processed_count += 1
 
     return processed_count
+
+
+@transaction.atomic
+def replay_outbox_event(event_id, reset_retries=True):
+    """
+    Replays an Outbox event from DEAD_LETTER or FAILED status back into PENDING.
+    Resets next_retry_at to now and optionally resets retry_count to allow clean reprocessing.
+    """
+    event = OutboxEvent.objects.select_for_update().get(id=event_id)
+    if reset_retries:
+        event.retry_count = 0
+    event.status = OutboxStatus.PENDING
+    event.next_retry_at = timezone.now()
+    if event.last_error:
+        event.last_error = f"[Replay Requested] Previous error: {event.last_error}"
+    event.save(update_fields=['status', 'retry_count', 'next_retry_at', 'last_error', 'updated_at'])
+    _logger.info("OutboxEvent %s was replayed and set to PENDING.", event_id)
+    return event
+
+
+def replay_all_dead_letter_events(store=None):
+    """
+    Replays all Outbox events currently residing in DEAD_LETTER status for a store (or globally).
+    """
+    qs = OutboxEvent.objects.filter(status=OutboxStatus.DEAD_LETTER)
+    if store:
+        qs = qs.filter(store=store)
+
+    ids = list(qs.values_list('id', flat=True))
+    replayed_count = 0
+    for eid in ids:
+        replay_outbox_event(eid)
+        replayed_count += 1
+
+    _logger.info("Replayed %d DEAD_LETTER outbox events.", replayed_count)
+    return replayed_count
 
 

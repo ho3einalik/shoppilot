@@ -415,10 +415,12 @@ class PaymentTransactionViewSet(viewsets.ModelViewSet):
                 else:
                     verified = p
 
+            is_overpayment = '[اضافه پرداخت]' in (verified.rejection_reason or '')
             return Response({
                 'success': True,
-                'message': res.message,
+                'message': res.message if not is_overpayment else 'پرداخت در درگاه تأیید شد. مبلغ مازاد بر سفارش جهت استرداد به مشتری ثبت شد.',
                 'tracking_code': res.tracking_code,
+                'is_overpayment': is_overpayment,
                 'payment': PaymentTransactionSerializer(verified).data
             }, status=status.HTTP_200_OK)
 

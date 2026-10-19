@@ -1317,3 +1317,181 @@ class TestFiveSeniorAuditRemediations:
             status=PaymentVerificationStatus.PENDING_VERIFICATION
         )
 
+    # =========================================================================
+    # NEW AUDIT FIX 1: Late Expired Payment Overpayment Handled Atomically
+    # =========================================================================
+    def test_late_expired_payment_callback_overpayment_handled_atomically(self, store_env):
+        """Late Zarinpal callback on an EXPIRED transaction does not crash on overpayment; records excess and verifies."""
+        from apps.orders.models import Order, PaymentStatus
+        from apps.payments.models import PaymentTransaction, PaymentVerificationStatus, PaymentMethod
+        from apps.payments.services import verify_payment_transaction
+        store = store_env['store']
+        customer = store_env['customer']
+        warehouse = store_env['warehouse']
+
+        order = Order.objects.create(
+            store=store,
+            customer=customer,
+            warehouse=warehouse,
+            order_number="ORD-OVERPAY-100",
+            grand_total=Decimal('100000'),
+            payment_status=PaymentStatus.PENDING
+        )
+
+        # Payment 1: Was created first, then timed out to EXPIRED
+        p1 = PaymentTransaction.objects.create(
+            store=store,
+            order=order,
+            method=PaymentMethod.ONLINE_GATEWAY,
+            amount=Decimal('100000'),
+            reference_number="GATEWAY-AUTH-001",
+            status=PaymentVerificationStatus.EXPIRED
+        )
+
+        # Payment 2: Completed cleanly and paid the order
+        p2 = PaymentTransaction.objects.create(
+            store=store,
+            order=order,
+            method=PaymentMethod.ONLINE_GATEWAY,
+            amount=Decimal('100000'),
+            reference_number="GATEWAY-AUTH-002",
+            status=PaymentVerificationStatus.PENDING_VERIFICATION
+        )
+        verify_payment_transaction(p2, user=None)
+        order.refresh_from_db()
+        assert order.payment_status == PaymentStatus.PAID
+
+        # Now Gateway callback arrives late for p1. Must NOT raise unhandled ValidationError.
+        p1.tracking_code = "TRK-LATE-999"
+        p1.save(update_fields=['tracking_code'])
+        verified_p1 = verify_payment_transaction(p1, user=None)
+
+        assert verified_p1.status == PaymentVerificationStatus.VERIFIED
+        assert "[اضافه پرداخت]" in verified_p1.rejection_reason
+        assert "100,000" in verified_p1.rejection_reason
+        order.refresh_from_db()
+        assert order.payment_status == PaymentStatus.PAID
+
+    # =========================================================================
+    # NEW AUDIT FIX 2: Celery Beat Periodic Tasks Scheduling
+    # =========================================================================
+    def test_celery_beat_schedule_contains_all_periodic_tasks(self):
+        """Verify beat_schedule registers outbox processing and payments reconciliation tasks."""
+        from config.celery import app
+        schedule = app.conf.beat_schedule
+
+        assert 'automation-process-pending-outbox-events' in schedule
+        assert schedule['automation-process-pending-outbox-events']['task'] == 'automation.process_pending_outbox_events_task'
+        assert schedule['automation-process-pending-outbox-events']['schedule'] == 30.0
+
+        assert 'payments-reconcile-pending-online' in schedule
+        assert schedule['payments-reconcile-pending-online']['task'] == 'payments.reconcile_pending_online_payments_task'
+        assert schedule['payments-reconcile-pending-online']['schedule'] == 600.0
+
+        # Verify payments task executes without exceptions
+        from apps.payments.tasks import reconcile_pending_online_payments_task
+        res = reconcile_pending_online_payments_task()
+        assert 'reconciled_count' in res
+        assert 'expired_count' in res
+
+    # =========================================================================
+    # NEW AUDIT FIX 3: Inventory commit_stock_sale Never Steals Other Reservations
+    # =========================================================================
+    def test_commit_stock_sale_empty_reference_does_not_steal_reservations(self, store_env):
+        """Unreferenced commit_stock_sale never depletes reserved_quantity and verifies available stock."""
+        from apps.inventory.services import (
+            adjust_stock, reserve_stock, commit_stock_sale, InsufficientStockError
+        )
+        store = store_env['store']
+        warehouse = store_env['warehouse']
+        variant = store_env['variant']
+
+        # 10 on hand, 4 reserved for active order ORD-ACTIVE
+        adjust_stock(store, warehouse, variant, new_on_hand=10, reason="Init")
+        reserve_stock(store, warehouse, variant, quantity=4, reference="ORD-ACTIVE")
+
+        balance = warehouse.balances.get(variant=variant)
+        assert balance.on_hand_quantity == 10
+        assert balance.reserved_quantity == 4
+        assert balance.available == 6
+
+        # Sale of 3 items with EMPTY reference: must NOT touch reserved_quantity
+        commit_stock_sale(
+            store=store,
+            warehouse=warehouse,
+            variant=variant,
+            quantity=3,
+            is_reservation=True,
+            reference=""
+        )
+
+        balance.refresh_from_db()
+        assert balance.on_hand_quantity == 7
+        assert balance.reserved_quantity == 4, "Reserved quantity was illegally depleted by unreferenced sale!"
+        assert balance.available == 3
+
+        # Selling 4 items when available is only 3 must raise InsufficientStockError
+        with pytest.raises(InsufficientStockError) as exc_info:
+            commit_stock_sale(
+                store=store,
+                warehouse=warehouse,
+                variant=variant,
+                quantity=4,
+                is_reservation=True,
+                reference=""
+            )
+        assert "رزروهای موجود متعلق به سایر سفارش‌ها هستند" in str(exc_info.value)
+
+        balance.refresh_from_db()
+        assert balance.reserved_quantity == 4
+
+    # =========================================================================
+    # NEW AUDIT FIX 4: Outbox Dead Letter Queue (DLQ) and Replay Service
+    # =========================================================================
+    def test_outbox_dlq_transition_and_replay(self, store_env):
+        """OutboxEvent moves to DEAD_LETTER after max_retries and can be replayed."""
+        from unittest.mock import patch
+        from apps.automation.models import OutboxEvent, OutboxStatus
+        from apps.automation.services import (
+            process_outbox_event, replay_outbox_event, replay_all_dead_letter_events
+        )
+        store = store_env['store']
+
+        event = OutboxEvent.objects.create(
+            store=store,
+            event_type="TEST_TRIGGER",
+            payload={"key": "val"},
+            status=OutboxStatus.PENDING,
+            max_retries=2
+        )
+
+        # Mock trigger_automation to fail
+        with patch('apps.automation.services.trigger_automation', side_effect=RuntimeError("Simulated external API crash")):
+            # First attempt: stays PENDING with exponential backoff next_retry_at
+            ev1 = process_outbox_event(event.id)
+            assert ev1.status == OutboxStatus.PENDING
+            assert ev1.retry_count == 1
+            assert "Simulated external API crash" in ev1.last_error
+
+            # Second attempt: reaches max_retries (2), moves to DEAD_LETTER
+            ev2 = process_outbox_event(event.id)
+            assert ev2.status == OutboxStatus.DEAD_LETTER
+            assert ev2.retry_count == 2
+            assert ev2.next_retry_at is None
+
+        # Replay single event
+        replayed = replay_outbox_event(event.id)
+        assert replayed.status == OutboxStatus.PENDING
+        assert replayed.retry_count == 0
+        assert "[Replay Requested]" in replayed.last_error
+
+        # Mark dead letter again and test bulk replay
+        replayed.status = OutboxStatus.DEAD_LETTER
+        replayed.save(update_fields=['status'])
+
+        bulk_count = replay_all_dead_letter_events(store=store)
+        assert bulk_count == 1
+        replayed.refresh_from_db()
+        assert replayed.status == OutboxStatus.PENDING
+
+

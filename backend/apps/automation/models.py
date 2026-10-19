@@ -84,6 +84,7 @@ class OutboxStatus(models.TextChoices):
     PROCESSING = 'PROCESSING', 'در حال پردازش'
     DELIVERED = 'DELIVERED', 'تحویل شده'
     FAILED = 'FAILED', 'ناموفق'
+    DEAD_LETTER = 'DEAD_LETTER', 'صف خطای نهایی (Dead Letter / نیازمند بررسی)'
 
 
 class OutboxEvent(TenantScopedModel):

@@ -15,18 +15,27 @@ def verify_payment_transaction(payment, user):
     # Lock order and check total verified payments to prevent overpayment race conditions
     order = Order.objects.select_for_update().get(id=payment.order_id)
     total_verified = sum(
-        p.amount for p in order.payments.filter(status=PaymentVerificationStatus.VERIFIED)
+        p.amount for p in order.payments.filter(status=PaymentVerificationStatus.VERIFIED).exclude(id=payment.id)
     )
 
-    if total_verified + payment.amount > order.grand_total:
+    from .models import PaymentMethod
+    is_online = payment.method == PaymentMethod.ONLINE_GATEWAY
+    is_overpayment = (total_verified + payment.amount) > order.grand_total
+
+    if is_overpayment and not is_online:
         from rest_framework.exceptions import ValidationError
         raise ValidationError(
             f"تأیید این تراکنش باعث پرداخت بیش از سقف سفارش خواهد شد. مجموع تأییدشده: {total_verified}، تراکنش فعلی: {payment.amount}، مبلغ کل: {order.grand_total}"
         )
 
+    excess_amount = max(Decimal('0'), (total_verified + payment.amount) - order.grand_total)
+
     payment.status = PaymentVerificationStatus.VERIFIED
     payment.verified_by = user
     payment.verified_at = timezone.now()
+    if excess_amount > 0:
+        overpay_note = f"[اضافه پرداخت] مبلغ {excess_amount:,.0f} {payment.currency} مازاد بر مبلغ کل سفارش پرداخت شده است (تأیید دیرهنگام تراکنش). نیازمند استرداد وجه."
+        payment.rejection_reason = f"{payment.rejection_reason} | {overpay_note}" if payment.rejection_reason else overpay_note
     payment.save()
 
     new_total_verified = total_verified + payment.amount
@@ -41,11 +50,31 @@ def verify_payment_transaction(payment, user):
     record_audit_event(
         store=payment.store,
         user=user,
-        action="PAYMENT_VERIFIED",
+        action="PAYMENT_VERIFIED" if excess_amount == 0 else "OVERPAYMENT_VERIFIED",
         target_type="PaymentTransaction",
         target_id=str(payment.id),
-        changes={'order_number': order.order_number, 'amount': str(payment.amount), 'order_payment_status': order.payment_status}
+        changes={
+            'order_number': order.order_number,
+            'amount': str(payment.amount),
+            'excess_amount': str(excess_amount),
+            'order_payment_status': order.payment_status
+        }
     )
+
+    if excess_amount > 0:
+        # Attempt non-blocking automatic refund if gateway refund credentials exist
+        try:
+            process_payment_refund(
+                payment=payment,
+                amount=excess_amount,
+                reason="استرداد اضافه پرداخت سفارش ناشی از تایید دیرهنگام تراکنش",
+                user=user,
+                is_manual=None
+            )
+        except Exception:
+            # If auto-refund cannot be executed immediately (e.g. gateway refund not configured),
+            # the transaction remains VERIFIED and flagged for manual refund / accounting resolution.
+            pass
 
     if order.payment_status == PaymentStatus.PAID:
         from apps.automation.services import publish_outbox_event
@@ -56,9 +85,10 @@ def verify_payment_transaction(payment, user):
             payload={
                 'order_id': str(order.id),
                 'order_number': order.order_number,
-                'customer_name': order.customer.full_name,
-                'customer_phone': order.customer.phone_number,
+                'customer_name': order.customer.full_name if order.customer else '',
+                'customer_phone': order.customer.phone_number if order.customer else '',
                 'amount': float(payment.amount),
+                'excess_amount': float(excess_amount),
                 'idempotency_key': f"order_paid_{order.id}"
             },
             event_key=f"order_paid_{order.id}"

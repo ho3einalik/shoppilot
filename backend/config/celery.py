@@ -20,6 +20,14 @@ app.conf.beat_schedule = {
         'task': 'inventory.check_low_stock_and_alert',
         'schedule': 3600.0,  # Every 1 hour
     },
+    'automation-process-pending-outbox-events': {
+        'task': 'automation.process_pending_outbox_events_task',
+        'schedule': 30.0,  # Every 30 seconds
+    },
+    'payments-reconcile-pending-online': {
+        'task': 'payments.reconcile_pending_online_payments_task',
+        'schedule': 600.0,  # Every 10 minutes
+    },
 }
 
 @app.task(bind=True, ignore_result=True)
