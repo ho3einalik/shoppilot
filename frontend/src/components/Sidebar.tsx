@@ -24,6 +24,7 @@ import {
   Sparkles,
   Store,
   Link2,
+  BookOpen,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useAuth } from '@/contexts/AuthContext';
@@ -140,8 +141,35 @@ export function Sidebar() {
         })}
       </nav>
 
-      {/* Bottom Section (Theme Toggle + User Pill) */}
+      {/* Bottom Section (Guide + Theme Toggle + User Pill) */}
       <div className="flex flex-col items-center gap-1.5 w-full pt-2.5 mt-1 border-t border-white/[0.06] light:border-slate-200">
+        {/* Quick In-App Guide Link */}
+        <Link
+          href="/settings/guide"
+          title="آموزش و راهنمای جامع سامانه"
+          className={cn(
+            'relative flex items-center transition-all group cursor-pointer rounded-xl h-10 w-full',
+            pathname === '/settings/guide'
+              ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 shadow-[0_0_15px_rgba(6,182,212,0.3)]'
+              : 'text-cyan-400 hover:text-cyan-200 hover:bg-cyan-500/10',
+            expanded ? 'px-3 gap-3 justify-start' : 'justify-center mx-auto w-10'
+          )}
+        >
+          <div className="w-7 h-7 rounded-lg bg-cyan-500/15 border border-cyan-500/30 flex items-center justify-center text-cyan-400 group-hover:scale-110 transition-transform shrink-0">
+            <BookOpen className="w-4 h-4" />
+          </div>
+          {expanded && (
+            <span className="text-xs font-bold text-cyan-300 whitespace-nowrap">
+              آموزش و راهنما
+            </span>
+          )}
+          {!expanded && (
+            <div className="absolute right-full mr-3 px-3 py-1.5 bg-[#0e1628] text-cyan-300 text-xs font-semibold rounded-xl shadow-xl border border-cyan-500/30 opacity-0 pointer-events-none group-hover:opacity-100 transition-opacity duration-150 whitespace-nowrap z-50">
+              آموزش و راهنمای سیستم
+            </div>
+          )}
+        </Link>
+
         {/* Working Theme mode button */}
         <button
           onClick={toggleTheme}

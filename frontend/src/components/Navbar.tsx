@@ -1,9 +1,10 @@
 'use client';
 
 import React, { useState, useEffect, useRef } from 'react';
+import Link from 'next/link';
 import { useAuth } from '@/contexts/AuthContext';
 import { useStore } from '@/contexts/StoreContext';
-import { Store, User, LogOut, Bell, ChevronDown, Sparkles, Check, CheckCheck, X } from 'lucide-react';
+import { Store, User, LogOut, Bell, ChevronDown, Sparkles, Check, CheckCheck, X, BookOpen } from 'lucide-react';
 import { api } from '@/lib/api';
 import { cn } from '@/lib/utils';
 
@@ -177,6 +178,16 @@ export function Navbar() {
           </span>
           <span>سامانه فعال</span>
         </div>
+
+        {/* In-App Guide Button */}
+        <Link
+          href="/settings/guide"
+          title="آموزش و راهنمای جامع ماژول‌های سامانه"
+          className="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-gradient-to-r from-cyan-500/15 via-blue-500/10 to-indigo-500/15 hover:from-cyan-500/25 hover:to-blue-500/20 border border-cyan-500/30 hover:border-cyan-400 text-cyan-300 hover:text-white text-xs font-bold transition-all shadow-[0_0_15px_rgba(6,182,212,0.2)] cursor-pointer"
+        >
+          <BookOpen className="w-4 h-4 text-cyan-400 animate-pulse" />
+          <span className="hidden sm:inline">آموزش و راهنما</span>
+        </Link>
 
         {/* Notification Bell */}
         {user && (
