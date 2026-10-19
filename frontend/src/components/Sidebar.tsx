@@ -5,7 +5,7 @@ import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import {
   LayoutDashboard,
-  LayoutGrid,
+  Package,
   Boxes,
   ShoppingCart,
   CreditCard,
@@ -37,7 +37,7 @@ interface NavItem {
 
 const mainNavItems: NavItem[] = [
   { href: '/', label: 'داشبورد عملیات', icon: LayoutDashboard },
-  { href: '/products', label: 'کاتالوگ و محصولات', icon: LayoutGrid },
+  { href: '/products', label: 'کاتالوگ و محصولات', icon: Package },
   { href: '/inventory', label: 'موجودی و انبارداری', icon: Boxes },
   { href: '/orders', label: 'مدیریت سفارشات', icon: ShoppingCart },
   { href: '/pos', label: 'صندوق حضوری و B2B', icon: Store },

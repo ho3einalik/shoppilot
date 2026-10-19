@@ -4,7 +4,7 @@ import React, { useState } from 'react';
 import Link from 'next/link';
 import {
   LayoutDashboard,
-  LayoutGrid,
+  Package,
   Boxes,
   ShoppingCart,
   Store,
@@ -75,7 +75,7 @@ const GUIDE_ITEMS: GuideSection[] = [
     title: 'کاتالوگ و تنوع محصولات',
     subtitle: 'تعریف کالاها، رنگ‌بندی، سایزها، SKU و قیمت‌گذاری',
     href: '/products',
-    icon: LayoutGrid,
+    icon: Package,
     accentColor: 'from-sky-500 to-indigo-500',
     description: 'بانک اطلاعاتی متمرکز تمامی اقلامی که می‌فروشید؛ شامل نام، تصاویر، دسته‌بندی، بارکد، تنوع‌ها (رنگ و سایز) و قیمت خرید و فروش.',
     whyNeeded: 'پایه‌ای‌ترین بخش سیستم است؛ تا محصولی تعریف نشود امکان ثبت موجودی، فاکتور خرید و سفارش فروش وجود ندارد.',
