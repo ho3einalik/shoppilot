@@ -16,6 +16,7 @@ class PaymentVerificationStatus(models.TextChoices):
     VERIFIED = 'VERIFIED', 'تأیید شده'
     REJECTED = 'REJECTED', 'رد شده'
     REFUNDED = 'REFUNDED', 'مسترد شده'
+    EXPIRED = 'EXPIRED', 'منقضی شده'
 
 class PaymentTransaction(TenantScopedModel):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -39,6 +40,13 @@ class PaymentTransaction(TenantScopedModel):
         verbose_name = 'تراکنش پرداخت'
         verbose_name_plural = 'تراکنش‌های پرداخت'
         ordering = ['-created_at']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['store', 'reference_number'],
+                condition=~models.Q(reference_number=''),
+                name='unique_store_non_empty_reference_number'
+            )
+        ]
 
     def __str__(self):
         return f"{self.amount} {self.currency} for {self.order.order_number} ({self.get_status_display()})"

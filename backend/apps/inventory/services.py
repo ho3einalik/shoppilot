@@ -4,7 +4,8 @@ from django.utils import timezone
 from django.core.exceptions import ValidationError
 from .models import (
     InventoryBalance, InventoryMovement, MovementType, Warehouse,
-    StockCycleCount, StockCycleCountItem, CycleCountStatus
+    StockCycleCount, StockCycleCountItem, CycleCountStatus,
+    StockReservation, ReservationStatus
 )
 from apps.audit.services import record_audit_event
 
@@ -34,7 +35,7 @@ def get_or_create_balance(store, warehouse, variant):
 
 @transaction.atomic
 def reserve_stock(store, warehouse, variant, quantity, reference='', user=None):
-    """Pessimistically lock the balance row and reserve stock for an order"""
+    """Pessimistically lock the balance row and reserve stock for an order with scoped StockReservation tracking"""
     if quantity <= 0:
         raise ValueError("Quantity to reserve must be greater than zero.")
 
@@ -47,7 +48,19 @@ def reserve_stock(store, warehouse, variant, quantity, reference='', user=None):
         )
 
     balance.reserved_quantity += quantity
-    balance.save()
+    balance.save(update_fields=['reserved_quantity', 'updated_at'])
+
+    # Track scoped reservation per order reference
+    if reference:
+        StockReservation.objects.create(
+            store=store,
+            order_number=reference,
+            warehouse=warehouse,
+            variant=variant,
+            quantity=quantity,
+            fulfilled_quantity=0,
+            status=ReservationStatus.ACTIVE
+        )
 
     # Record movement
     InventoryMovement.objects.create(
@@ -65,14 +78,42 @@ def reserve_stock(store, warehouse, variant, quantity, reference='', user=None):
 
 @transaction.atomic
 def release_stock_reservation(store, warehouse, variant, quantity, reference='', user=None):
-    """Release previously reserved stock (e.g. order cancelled or expired)"""
+    """Release previously reserved stock scoped to the specific order reference"""
     if quantity <= 0:
         return None
 
     balance = get_or_create_balance(store, warehouse, variant)
-    release_qty = min(quantity, balance.reserved_quantity)
-    balance.reserved_quantity -= release_qty
-    balance.save()
+
+    if reference:
+        matching_reservations = list(StockReservation.objects.select_for_update().filter(
+            store=store,
+            order_number=reference,
+            warehouse=warehouse,
+            variant=variant,
+            status=ReservationStatus.ACTIVE
+        ))
+        total_order_active = sum(r.quantity - r.fulfilled_quantity for r in matching_reservations)
+        if total_order_active <= 0:
+            # Order has no active reservation to release
+            return balance
+
+        release_qty = min(quantity, total_order_active)
+        needed_release = release_qty
+        for r in matching_reservations:
+            rem = r.quantity - r.fulfilled_quantity
+            take = min(needed_release, rem)
+            r.quantity -= take
+            if r.quantity <= r.fulfilled_quantity:
+                r.status = ReservationStatus.RELEASED
+            r.save(update_fields=['quantity', 'status', 'updated_at'])
+            needed_release -= take
+            if needed_release == 0:
+                break
+    else:
+        release_qty = min(quantity, balance.reserved_quantity)
+
+    balance.reserved_quantity = max(0, balance.reserved_quantity - release_qty)
+    balance.save(update_fields=['reserved_quantity', 'updated_at'])
 
     InventoryMovement.objects.create(
         store=store,
@@ -90,44 +131,101 @@ def release_stock_reservation(store, warehouse, variant, quantity, reference='',
 @transaction.atomic
 def commit_stock_sale(store, warehouse, variant, quantity, reference='', user=None, is_reservation=True):
     """
-    Deducts stock for an actual sale with strict inventory check.
+    Deducts stock for an actual sale with strict inventory check and scoped reservation protection.
     If is_reservation=True (default for fulfilling previously reserved orders):
-        - strictly verifies on_hand_quantity >= quantity
-        - deducts min(quantity, reserved_quantity) from reserved_quantity
-        - deducts quantity from on_hand_quantity
+        - Strictly verifies on_hand_quantity >= quantity.
+        - If reference is provided:
+            * Scans active StockReservation records for this specific order.
+            * Consumes ONLY this order's reservations (marking fulfilled).
+            * If order had NO reservation: strictly requires unreserved stock (available >= quantity)
+              and does NOT decrement global reserved_quantity (preventing stealing other orders' reservations).
+            * If order had partial reservation: fulfills what it had, verifies available stock for the remainder.
+        - If reference is empty: falls back to generic deduction min(quantity, reserved_quantity).
     If is_reservation=False (for direct/walk-in sales or exchange returns without prior reservation):
-        - strictly verifies available unreserved stock (available >= quantity)
-        - deducts quantity from on_hand_quantity ONLY, protecting other orders' reserved stock
+        - Strictly verifies unreserved stock (available >= quantity).
+        - Deducts quantity from on_hand_quantity ONLY, protecting all orders' reserved stock.
     """
     if quantity <= 0:
         return None
 
     balance = get_or_create_balance(store, warehouse, variant)
 
-    if is_reservation:
-        # Strictly verify on-hand quantity: NEVER silently clamp to zero
-        if balance.on_hand_quantity < quantity:
-            raise InsufficientStockError(
-                f"موجودی فیزیکی در انبار {warehouse.name} برای {variant.sku} کافی نیست. "
-                f"موجودی موجود: {balance.on_hand_quantity}، مقدار درخواستی: {quantity}"
-            )
+    # Strictly verify physical on-hand quantity
+    if balance.on_hand_quantity < quantity:
+        raise InsufficientStockError(
+            f"موجودی فیزیکی در انبار {warehouse.name} برای {variant.sku} کافی نیست. "
+            f"موجودی فیزیکی موجود: {balance.on_hand_quantity}، مقدار درخواستی: {quantity}"
+        )
 
-        # Deduct from reservation if available
-        reserved_deduct = min(quantity, balance.reserved_quantity)
-        balance.reserved_quantity -= reserved_deduct
-        balance.on_hand_quantity -= quantity
-        balance.save()
+    if is_reservation:
+        if reference:
+            order_reservations = list(StockReservation.objects.select_for_update().filter(
+                store=store,
+                order_number=reference,
+                warehouse=warehouse,
+                variant=variant,
+                status=ReservationStatus.ACTIVE
+            ))
+            order_active_res = sum(r.quantity - r.fulfilled_quantity for r in order_reservations)
+
+            if order_active_res >= quantity:
+                # Fully covered by this order's scoped reservation
+                needed = quantity
+                for r in order_reservations:
+                    rem = r.quantity - r.fulfilled_quantity
+                    take = min(needed, rem)
+                    r.fulfilled_quantity += take
+                    if r.fulfilled_quantity >= r.quantity:
+                        r.status = ReservationStatus.FULFILLED
+                    r.save(update_fields=['fulfilled_quantity', 'status', 'updated_at'])
+                    needed -= take
+                    if needed == 0:
+                        break
+
+                balance.reserved_quantity = max(0, balance.reserved_quantity - quantity)
+                balance.on_hand_quantity -= quantity
+            elif order_active_res > 0:
+                # Partially covered by this order's reservation
+                partial_res = order_active_res
+                unreserved_needed = quantity - partial_res
+                if balance.available < unreserved_needed:
+                    raise InsufficientStockError(
+                        f"موجودی آزاد کافی برای تکمیل بخش بدون رزرو سفارش {reference} وجود ندارد. "
+                        f"رزرو سفارش: {partial_res}، کسری بدون رزرو: {unreserved_needed}، موجودی آزاد: {balance.available}"
+                    )
+                for r in order_reservations:
+                    r.fulfilled_quantity = r.quantity
+                    r.status = ReservationStatus.FULFILLED
+                    r.save(update_fields=['fulfilled_quantity', 'status', 'updated_at'])
+
+                balance.reserved_quantity = max(0, balance.reserved_quantity - partial_res)
+                balance.on_hand_quantity -= quantity
+            else:
+                # Order had NO active reservation! Cannot steal other orders' reservations.
+                if balance.available < quantity:
+                    raise InsufficientStockError(
+                        f"سفارش {reference} رزروی برای این کالا ندارد و موجودی آزاد انبار ({balance.available}) کمتر از مقدار درخواستی ({quantity}) است. "
+                        f"رزروهای موجود متعلق به سایر سفارش‌ها هستند و امکان مصرف آن‌ها وجود ندارد."
+                    )
+                balance.on_hand_quantity -= quantity
+        else:
+            # No order reference provided: fall back to generic deduction
+            reserved_deduct = min(quantity, balance.reserved_quantity)
+            balance.reserved_quantity = max(0, balance.reserved_quantity - reserved_deduct)
+            balance.on_hand_quantity -= quantity
+
         movement_reason = f"تحویل سفارش {reference}"
     else:
-        # Unreserved sale: must verify available stock (on_hand - reserved)
+        # Unreserved direct sale: must verify available stock (on_hand - reserved - quarantined)
         if balance.available < quantity:
             raise InsufficientStockError(
                 f"موجودی آزاد در انبار {warehouse.name} برای {variant.sku} کافی نیست. "
                 f"موجودی آزاد: {balance.available} (کل: {balance.on_hand_quantity}، رزرو شده: {balance.reserved_quantity})، مقدار درخواستی: {quantity}"
             )
         balance.on_hand_quantity -= quantity
-        balance.save()
         movement_reason = f"فروش مستقیم/تعویض کالا {reference}"
+
+    balance.save(update_fields=['on_hand_quantity', 'reserved_quantity', 'updated_at'])
 
     InventoryMovement.objects.create(
         store=store,

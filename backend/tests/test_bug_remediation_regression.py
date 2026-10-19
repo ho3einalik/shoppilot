@@ -652,10 +652,10 @@ class TestComprehensiveCodeRemediations:
             )
 
         assert resp.status_code == status.HTTP_502_BAD_GATEWAY
-        # Pre-created transaction must be marked REJECTED
+        # Pre-created transaction must be marked EXPIRED on timeout/COMMUNICATION_ERROR so slot is freed and recoverable
         failed_tx = PaymentTransaction.objects.filter(order=order).first()
         assert failed_tx is not None
-        assert failed_tx.status == PaymentVerificationStatus.REJECTED
+        assert failed_tx.status in [PaymentVerificationStatus.EXPIRED, PaymentVerificationStatus.REJECTED]
 
     def test_online_verify_rejects_non_gateway_and_terminal_states(self, store_context):
         """Item 3: Callback ignores non-gateway payments and rejects re-verifying refunded/rejected transactions."""
@@ -852,3 +852,468 @@ class TestComprehensiveCodeRemediations:
         # Nested dicts
         assert sanitized['meta']['auth']['credentials'] == '***REDACTED***'
         assert sanitized['meta']['deep_phones'][0]['contact'] == '0910****567'
+
+
+@pytest.mark.django_db
+class TestFiveSeniorAuditRemediations:
+    @pytest.fixture
+    def store_env(self):
+        user = User.objects.create_user(email="senior_audit@example.com", password="pass", full_name="Audit Owner")
+        biz = Business.objects.create(name="Audit Biz", owner=user)
+        store = Store.objects.create(business=biz, name="Audit Store", currency="IRT")
+        StoreMembership.objects.create(store=store, user=user, role=Role.OWNER, is_active=True)
+        warehouse = Warehouse.objects.create(store=store, name="Central Wh", is_default=True)
+        customer = Customer.objects.create(store=store, full_name="Saeed Rad", phone_number="09120001122")
+        product = Product.objects.create(store=store, name="Audit Product")
+        variant = ProductVariant.objects.create(
+            store=store,
+            product=product,
+            name="Default",
+            sku="AUD-SKU-01",
+            retail_price=Decimal('100000')
+        )
+        return {
+            'user': user,
+            'store': store,
+            'warehouse': warehouse,
+            'customer': customer,
+            'variant': variant
+        }
+
+    # ==========================================
+    # ITEM 1: Payments Timeout & TTL & Reconcile
+    # ==========================================
+    def test_item1_gateway_timeout_sets_expired_allowing_retry(self, store_env):
+        """Item 1: Gateway timeout/communication error sets EXPIRED, releasing payable sum for customer retry."""
+        from apps.payments.models import PaymentVerificationStatus
+        from apps.orders.models import Order, OrderStatus
+        store = store_env['store']
+        warehouse = store_env['warehouse']
+        customer = store_env['customer']
+
+        order = Order.objects.create(
+            store=store,
+            order_number="ORD-TIMEOUT-001",
+            customer=customer,
+            warehouse=warehouse,
+            order_status=OrderStatus.CONFIRMED,
+            grand_total=Decimal('200000')
+        )
+
+        client = APIClient()
+        client.force_authenticate(user=store_env['user'])
+
+        # Mock gateway communication error / timeout
+        with patch('apps.payments.views.get_payment_gateway') as mock_gw_factory:
+            mock_gw = MagicMock()
+            mock_gw.request_payment.return_value = {
+                'success': False,
+                'status': 'COMMUNICATION_ERROR',
+                'message': 'اتصال با درگاه زرین‌پال به دلیل تایم‌اوت ناموفق بود.'
+            }
+            mock_gw_factory.return_value = mock_gw
+
+            res = client.post(
+                '/api/v1/payments/online-checkout/',
+                {'order_id': str(order.id)},
+                format='json',
+                HTTP_X_STORE_ID=str(store.id)
+            )
+            assert res.status_code == status.HTTP_502_BAD_GATEWAY
+            assert res.data['status'] == 'COMMUNICATION_ERROR'
+
+        # Check transaction state is EXPIRED, NOT permanent REJECTED
+        tx = order.payments.first()
+        assert tx is not None
+        assert tx.status == PaymentVerificationStatus.EXPIRED
+        assert "تایم‌اوت" in tx.rejection_reason
+
+        # Next checkout attempt must NOT be blocked by 409 conflict
+        with patch('apps.payments.views.get_payment_gateway') as mock_gw_factory:
+            mock_gw = MagicMock()
+            mock_gw.request_payment.return_value = {
+                'success': True,
+                'authority': 'ZARIN-RETRY-OK',
+                'payment_url': 'https://payment.zarinpal.com/pay'
+            }
+            mock_gw_factory.return_value = mock_gw
+
+            res2 = client.post(
+                '/api/v1/payments/online-checkout/',
+                {'order_id': str(order.id)},
+                format='json',
+                HTTP_X_STORE_ID=str(store.id)
+            )
+            assert res2.status_code == status.HTTP_200_OK
+            assert res2.data['authority'] == 'ZARIN-RETRY-OK'
+
+    def test_item1_stale_pending_payment_ttl_lazy_expiry(self, store_env):
+        """Item 1: Pending payment older than 20 minutes is lazily expired to release pending sum."""
+        import datetime
+        from django.utils import timezone
+        from apps.payments.models import PaymentTransaction, PaymentMethod, PaymentVerificationStatus
+        from apps.orders.models import Order, OrderStatus
+        store = store_env['store']
+        warehouse = store_env['warehouse']
+        customer = store_env['customer']
+
+        order = Order.objects.create(
+            store=store,
+            order_number="ORD-TTL-001",
+            customer=customer,
+            warehouse=warehouse,
+            order_status=OrderStatus.CONFIRMED,
+            grand_total=Decimal('300000')
+        )
+
+        # Stale transaction from 25 minutes ago
+        old_time = timezone.now() - datetime.timedelta(minutes=25)
+        stale_tx = PaymentTransaction.objects.create(
+            store=store,
+            order=order,
+            method=PaymentMethod.ONLINE_GATEWAY,
+            amount=Decimal('300000'),
+            reference_number="AUTH-OLD-TTL",
+            status=PaymentVerificationStatus.PENDING_VERIFICATION
+        )
+        PaymentTransaction.objects.filter(id=stale_tx.id).update(created_at=old_time)
+
+        client = APIClient()
+        client.force_authenticate(user=store_env['user'])
+
+        with patch('apps.payments.views.get_payment_gateway') as mock_gw_factory:
+            mock_gw = MagicMock()
+            mock_gw.request_payment.return_value = {
+                'success': True,
+                'authority': 'ZARIN-FRESH-AUTH',
+                'payment_url': 'https://payment.zarinpal.com/pay'
+            }
+            mock_gw_factory.return_value = mock_gw
+
+            res = client.post(
+                '/api/v1/payments/online-checkout/',
+                {'order_id': str(order.id)},
+                format='json',
+                HTTP_X_STORE_ID=str(store.id)
+            )
+            assert res.status_code == status.HTTP_200_OK
+
+        stale_tx.refresh_from_db()
+        assert stale_tx.status == PaymentVerificationStatus.EXPIRED
+
+    def test_item1_verify_expired_transaction_recovers_if_customer_paid(self, store_env):
+        """Item 1: online_verify permits verifying an EXPIRED transaction if gateway confirms payment."""
+        from apps.payments.models import PaymentTransaction, PaymentMethod, PaymentVerificationStatus
+        from apps.payments.gateways import GatewayPaymentResult
+        from apps.orders.models import Order, OrderStatus
+        store = store_env['store']
+        warehouse = store_env['warehouse']
+        customer = store_env['customer']
+
+        order = Order.objects.create(
+            store=store,
+            order_number="ORD-EXP-VERIFY-001",
+            customer=customer,
+            warehouse=warehouse,
+            order_status=OrderStatus.CONFIRMED,
+            grand_total=Decimal('150000')
+        )
+
+        expired_tx = PaymentTransaction.objects.create(
+            store=store,
+            order=order,
+            method=PaymentMethod.ONLINE_GATEWAY,
+            amount=Decimal('150000'),
+            reference_number="AUTH-EXPIRED-PAID",
+            status=PaymentVerificationStatus.EXPIRED
+        )
+
+        client = APIClient()
+        with patch('apps.payments.views.get_payment_gateway') as mock_gw_factory:
+            mock_gw = MagicMock()
+            mock_gw.verify_payment.return_value = GatewayPaymentResult(
+                success=True,
+                tracking_code='TRK-LATE-SUCCESS-99',
+                status='PAID',
+                message='تراکنش با موفقیت پرداخت گردید.'
+            )
+            mock_gw_factory.return_value = mock_gw
+
+            res = client.get(
+                '/api/v1/payments/online-verify/',
+                {'authority': 'AUTH-EXPIRED-PAID', 'Status': 'OK'},
+                HTTP_X_STORE_ID=str(store.id)
+            )
+            assert res.status_code == status.HTTP_200_OK
+            assert res.data['success'] is True
+
+        expired_tx.refresh_from_db()
+        assert expired_tx.status == PaymentVerificationStatus.VERIFIED
+        assert expired_tx.tracking_code == 'TRK-LATE-SUCCESS-99'
+
+    def test_item1_background_reconciliation(self, store_env):
+        """Item 1: reconcile_pending_online_payments settles confirmed payments and expires dangling ones."""
+        import datetime
+        from django.utils import timezone
+        from apps.payments.models import PaymentTransaction, PaymentMethod, PaymentVerificationStatus
+        from apps.payments.services import reconcile_pending_online_payments
+        from apps.payments.gateways import GatewayPaymentResult
+        from apps.orders.models import Order, OrderStatus
+        store = store_env['store']
+        warehouse = store_env['warehouse']
+        customer = store_env['customer']
+
+        order = Order.objects.create(
+            store=store,
+            order_number="ORD-RECON-001",
+            customer=customer,
+            warehouse=warehouse,
+            order_status=OrderStatus.CONFIRMED,
+            grand_total=Decimal('100000')
+        )
+
+        old_time = timezone.now() - datetime.timedelta(minutes=30)
+        tx = PaymentTransaction.objects.create(
+            store=store,
+            order=order,
+            method=PaymentMethod.ONLINE_GATEWAY,
+            amount=Decimal('100000'),
+            reference_number="AUTH-RECON-OK",
+            status=PaymentVerificationStatus.PENDING_VERIFICATION
+        )
+        PaymentTransaction.objects.filter(id=tx.id).update(created_at=old_time)
+
+        with patch('apps.payments.gateways.get_payment_gateway') as mock_gw_factory:
+            mock_gw = MagicMock()
+            mock_gw.verify_payment.return_value = GatewayPaymentResult(
+                success=True,
+                tracking_code='TRK-RECON-1234',
+                status='PAID',
+                message='تأیید در تطبیق دوره‌ای'
+            )
+            mock_gw_factory.return_value = mock_gw
+
+            result = reconcile_pending_online_payments(store=store)
+            assert result['reconciled_count'] == 1
+            assert str(tx.id) in result['reconciled_ids']
+
+        tx.refresh_from_db()
+        assert tx.status == PaymentVerificationStatus.VERIFIED
+
+    # ==========================================
+    # ITEM 2: Scoped Stock Reservations
+    # ==========================================
+    def test_item2_scoped_reservation_fulfillment_and_protection(self, store_env):
+        """Item 2: StockReservation scoped per order prevents reservation stealing."""
+        from apps.inventory.models import StockReservation, ReservationStatus
+        from apps.inventory.services import (
+            adjust_stock, reserve_stock, commit_stock_sale, release_stock_reservation, InsufficientStockError
+        )
+        store = store_env['store']
+        warehouse = store_env['warehouse']
+        variant = store_env['variant']
+
+        # Start with 10 on hand
+        adjust_stock(store, warehouse, variant, new_on_hand=10, reason="Initial")
+
+        # Order A reserves 4 items
+        reserve_stock(store, warehouse, variant, quantity=4, reference="ORD-A")
+        res_a = StockReservation.objects.filter(order_number="ORD-A").first()
+        assert res_a is not None
+        assert res_a.quantity == 4
+        assert res_a.status == ReservationStatus.ACTIVE
+
+        # Available is now 10 - 4 = 6. Reserved is 4.
+        balance = warehouse.balances.get(variant=variant)
+        assert balance.available == 6
+        assert balance.reserved_quantity == 4
+
+        # Order B has NO reservation. If Order B attempts to buy 7 items, it must FAIL (cannot steal Order A's 4 reserved)
+        with pytest.raises(InsufficientStockError) as exc_info:
+            commit_stock_sale(store, warehouse, variant, quantity=7, reference="ORD-B", is_reservation=True)
+        assert "رزروهای موجود متعلق به سایر سفارش‌ها هستند" in str(exc_info.value)
+
+        # Order A fulfills its 4 items
+        commit_stock_sale(store, warehouse, variant, quantity=4, reference="ORD-A", is_reservation=True)
+        res_a.refresh_from_db()
+        assert res_a.status == ReservationStatus.FULFILLED
+        assert res_a.fulfilled_quantity == 4
+
+        # Balance check: on_hand=6, reserved=0, available=6
+        balance.refresh_from_db()
+        assert balance.on_hand_quantity == 6
+        assert balance.reserved_quantity == 0
+        assert balance.available == 6
+
+    def test_item2_scoped_reservation_release(self, store_env):
+        """Item 2: release_stock_reservation releases only the specified order's reservation."""
+        from apps.inventory.models import StockReservation, ReservationStatus
+        from apps.inventory.services import (
+            adjust_stock, reserve_stock, release_stock_reservation
+        )
+        store = store_env['store']
+        warehouse = store_env['warehouse']
+        variant = store_env['variant']
+
+        adjust_stock(store, warehouse, variant, new_on_hand=10, reason="Init")
+
+        reserve_stock(store, warehouse, variant, quantity=3, reference="ORD-C1")
+        reserve_stock(store, warehouse, variant, quantity=2, reference="ORD-C2")
+
+        balance = warehouse.balances.get(variant=variant)
+        assert balance.reserved_quantity == 5
+
+        # Release ORD-C1
+        release_stock_reservation(store, warehouse, variant, quantity=3, reference="ORD-C1")
+
+        balance.refresh_from_db()
+        assert balance.reserved_quantity == 2
+
+        res_c1 = StockReservation.objects.get(order_number="ORD-C1")
+        assert res_c1.status == ReservationStatus.RELEASED
+
+        res_c2 = StockReservation.objects.get(order_number="ORD-C2")
+        assert res_c2.status == ReservationStatus.ACTIVE
+        assert res_c2.quantity == 2
+
+    # ==========================================
+    # ITEM 3: Transactional Outbox Pattern
+    # ==========================================
+    def test_item3_transactional_outbox_publish_and_process(self, store_env):
+        """Item 3: publish_outbox_event persists event in DB and process_outbox_event delivers it."""
+        from apps.automation.models import TriggerEvent, OutboxEvent, OutboxStatus, AutomationRule
+        from apps.automation.services import publish_outbox_event, process_outbox_event
+        store = store_env['store']
+
+        # Create active rule
+        AutomationRule.objects.create(
+            store=store,
+            name="Notify on Order",
+            trigger=TriggerEvent.ORDER_CREATED,
+            actions=[{'type': 'NOTIFY_TEAM', 'message': 'New order created'}],
+            is_active=True
+        )
+
+        event = publish_outbox_event(
+            store=store,
+            event_type=TriggerEvent.ORDER_CREATED,
+            payload={'order_id': 'ORD-TEST-UUID', 'customer_name': 'Test Cust', 'idempotency_key': 'key-123'},
+            event_key='order_created_ORD-TEST-UUID'
+        )
+
+        assert event.status in [OutboxStatus.PENDING, OutboxStatus.DELIVERED]
+        assert OutboxEvent.objects.filter(id=event.id).exists()
+
+        # Explicit processing
+        processed = process_outbox_event(event.id)
+        assert processed.status == OutboxStatus.DELIVERED
+        assert processed.processed_at is not None
+
+    def test_item3_outbox_retry_and_backoff(self, store_env):
+        """Item 3: OutboxEvent records errors and calculates next_retry_at on failures."""
+        from apps.automation.models import TriggerEvent, OutboxEvent, OutboxStatus
+        from apps.automation.services import publish_outbox_event, process_outbox_event
+        store = store_env['store']
+
+        event = OutboxEvent.objects.create(
+            store=store,
+            event_type=TriggerEvent.ORDER_CREATED,
+            payload={'order_id': 'ORD-FAIL-TEST'},
+            status=OutboxStatus.PENDING,
+            max_retries=3
+        )
+
+        with patch('apps.automation.services.trigger_automation', side_effect=RuntimeError("Transient error")):
+            process_outbox_event(event.id)
+
+        event.refresh_from_db()
+        assert event.status == OutboxStatus.PENDING
+        assert event.retry_count == 1
+        assert "Transient error" in event.last_error
+        assert event.next_retry_at is not None
+
+    # ==========================================
+    # ITEM 4: Atomic Daily Order Sequence
+    # ==========================================
+    def test_item4_atomic_sequential_order_numbers(self, store_env):
+        """Item 4: DailyOrderSequence generates monotonic, strictly collision-free order numbers."""
+        from apps.orders.services import generate_order_number
+        from apps.orders.models import DailyOrderSequence
+        from django.utils import timezone
+        store = store_env['store']
+
+        date_str = timezone.now().strftime('%Y%m%d')
+
+        ord1 = generate_order_number(store)
+        ord2 = generate_order_number(store)
+        ord3 = generate_order_number(store)
+
+        assert ord1 == f"ORD-{date_str}-0001"
+        assert ord2 == f"ORD-{date_str}-0002"
+        assert ord3 == f"ORD-{date_str}-0003"
+
+        seq = DailyOrderSequence.objects.get(store=store, date_key=date_str)
+        assert seq.last_seq == 3
+
+    # ==========================================
+    # ITEM 5: Database Unique Reference Constraint
+    # ==========================================
+    def test_item5_unique_store_reference_number_constraint(self, store_env):
+        """Item 5: Database enforces uniqueness on (store, reference_number) for non-empty references."""
+        from django.db import IntegrityError
+        from apps.payments.models import PaymentTransaction, PaymentMethod, PaymentVerificationStatus
+        from apps.orders.models import Order, OrderStatus
+        store = store_env['store']
+        warehouse = store_env['warehouse']
+        customer = store_env['customer']
+
+        order = Order.objects.create(
+            store=store,
+            order_number="ORD-UNIQ-REF-001",
+            customer=customer,
+            warehouse=warehouse,
+            order_status=OrderStatus.CONFIRMED,
+            grand_total=Decimal('100000')
+        )
+
+        # 1. First transaction with ref 'REF-UNIQUE-XYZ' succeeds
+        PaymentTransaction.objects.create(
+            store=store,
+            order=order,
+            method=PaymentMethod.ONLINE_GATEWAY,
+            amount=Decimal('50000'),
+            reference_number="REF-UNIQUE-XYZ",
+            status=PaymentVerificationStatus.PENDING_VERIFICATION
+        )
+
+        # 2. Second transaction with the SAME reference in the SAME store must raise IntegrityError
+        from django.db import transaction
+        with pytest.raises(IntegrityError):
+            with transaction.atomic():
+                PaymentTransaction.objects.create(
+                    store=store,
+                    order=order,
+                    method=PaymentMethod.ONLINE_GATEWAY,
+                    amount=Decimal('50000'),
+                    reference_number="REF-UNIQUE-XYZ",
+                    status=PaymentVerificationStatus.PENDING_VERIFICATION
+                )
+
+        # 3. Empty reference numbers are allowed to be multiple
+        PaymentTransaction.objects.create(
+            store=store,
+            order=order,
+            method=PaymentMethod.CARD_TO_CARD,
+            amount=Decimal('25000'),
+            reference_number="",
+            status=PaymentVerificationStatus.PENDING_VERIFICATION
+        )
+        PaymentTransaction.objects.create(
+            store=store,
+            order=order,
+            method=PaymentMethod.CARD_TO_CARD,
+            amount=Decimal('25000'),
+            reference_number="",
+            status=PaymentVerificationStatus.PENDING_VERIFICATION
+        )
+

@@ -48,35 +48,21 @@ def verify_payment_transaction(payment, user):
     )
 
     if order.payment_status == PaymentStatus.PAID:
-        import logging
-        _logger = logging.getLogger(__name__)
-
-        def _dispatch_order_paid():
-            try:
-                from apps.automation.services import trigger_automation
-                from apps.automation.models import TriggerEvent
-                trigger_automation(
-                    store=payment.store,
-                    trigger_event=TriggerEvent.ORDER_PAID,
-                    payload={
-                        'order_id': str(order.id),
-                        'order_number': order.order_number,
-                        'customer_name': order.customer.full_name,
-                        'customer_phone': order.customer.phone_number,
-                        'amount': float(payment.amount),
-                        'idempotency_key': f"order_paid_{order.id}"
-                    }
-                )
-            except Exception as exc:
-                # Log structured error — do not silently swallow. Automation failures
-                # should be visible and recoverable, not masked by a bare pass.
-                _logger.error(
-                    "Automation dispatch failed for ORDER_PAID event",
-                    exc_info=True,
-                    extra={'order_id': str(order.id), 'payment_id': str(payment.id), 'error': str(exc)}
-                )
-
-        transaction.on_commit(_dispatch_order_paid)
+        from apps.automation.services import publish_outbox_event
+        from apps.automation.models import TriggerEvent
+        publish_outbox_event(
+            store=payment.store,
+            event_type=TriggerEvent.ORDER_PAID,
+            payload={
+                'order_id': str(order.id),
+                'order_number': order.order_number,
+                'customer_name': order.customer.full_name,
+                'customer_phone': order.customer.phone_number,
+                'amount': float(payment.amount),
+                'idempotency_key': f"order_paid_{order.id}"
+            },
+            event_key=f"order_paid_{order.id}"
+        )
 
     return payment
 
@@ -227,4 +213,83 @@ def process_payment_refund(payment, amount=None, reason="", user=None, is_manual
         }
     )
     return payment
+
+
+def reconcile_pending_online_payments(store=None, max_age_hours=24):
+    """
+    Background reconciliation job for unresolved online payments.
+    Examines PENDING_VERIFICATION online payments created more than 20 minutes ago.
+    Verifies authority with the gateway:
+    - If paid: verifies transaction and settles order.
+    - If definitively failed / not found: marks EXPIRED.
+    - If communication error: leaves for next cycle.
+    """
+    import datetime
+    from .models import PaymentMethod
+    now = timezone.now()
+    cutoff_ttl = now - datetime.timedelta(minutes=20)
+    cutoff_max = now - datetime.timedelta(hours=max_age_hours)
+
+    qs = PaymentTransaction.objects.filter(
+        method=PaymentMethod.ONLINE_GATEWAY,
+        status=PaymentVerificationStatus.PENDING_VERIFICATION,
+        created_at__lt=cutoff_ttl,
+        created_at__gte=cutoff_max
+    ).select_related('store', 'order')
+
+    if store:
+        qs = qs.filter(store=store)
+
+    from .gateways import get_payment_gateway
+    gateway = get_payment_gateway('zarinpal')
+
+    reconciled = []
+    expired = []
+    errors = []
+
+    for tx in qs:
+        if not tx.reference_number or tx.reference_number.startswith('REQ_'):
+            # Transaction was never assigned a gateway authority
+            tx.status = PaymentVerificationStatus.EXPIRED
+            tx.rejection_reason = "انقضای خودکار: شناسه درگاه دریافت نشد."
+            tx.save(update_fields=['status', 'rejection_reason', 'updated_at'])
+            expired.append(str(tx.id))
+            continue
+
+        try:
+            res = gateway.verify_payment(
+                authority=tx.reference_number,
+                amount=tx.amount,
+                store=tx.store,
+                currency=tx.currency
+            )
+            if res.success:
+                with transaction.atomic():
+                    p = PaymentTransaction.objects.select_for_update().get(id=tx.id)
+                    if p.status in [PaymentVerificationStatus.PENDING_VERIFICATION, PaymentVerificationStatus.EXPIRED]:
+                        p.tracking_code = res.tracking_code
+                        p.save(update_fields=['tracking_code'])
+                        verify_payment_transaction(p, user=None)
+                        reconciled.append(str(tx.id))
+            elif res.status == 'COMMUNICATION_ERROR':
+                errors.append({'id': str(tx.id), 'error': 'COMMUNICATION_ERROR'})
+            else:
+                with transaction.atomic():
+                    p = PaymentTransaction.objects.select_for_update().get(id=tx.id)
+                    if p.status == PaymentVerificationStatus.PENDING_VERIFICATION:
+                        p.status = PaymentVerificationStatus.EXPIRED
+                        p.rejection_reason = f"تطبیق خودکار: درگاه پرداخت تراکنش را رد یا منقضی اعلام کرد ({res.message})"
+                        p.save(update_fields=['status', 'rejection_reason', 'updated_at'])
+                        expired.append(str(tx.id))
+        except Exception as exc:
+            errors.append({'id': str(tx.id), 'error': str(exc)})
+
+    return {
+        'reconciled_count': len(reconciled),
+        'reconciled_ids': reconciled,
+        'expired_count': len(expired),
+        'expired_ids': expired,
+        'errors': errors
+    }
+
 

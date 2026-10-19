@@ -142,3 +142,42 @@ class StockCycleCountItem(models.Model):
     def __str__(self):
         return f"{self.variant.sku}: سیستم={self.system_quantity}, شمارش={self.counted_quantity}"
 
+
+class ReservationStatus(models.TextChoices):
+    ACTIVE = 'ACTIVE', 'فعال'
+    RELEASED = 'RELEASED', 'آزاد شده'
+    FULFILLED = 'FULFILLED', 'مصرف شده (ارسال سفارش)'
+
+
+class StockReservation(TenantScopedModel):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    order_number = models.CharField(max_length=150, db_index=True, verbose_name="شماره سفارش مرجع")
+    warehouse = models.ForeignKey(Warehouse, on_delete=models.CASCADE, related_name='reservations')
+    variant = models.ForeignKey(ProductVariant, on_delete=models.CASCADE, related_name='reservations')
+    quantity = models.PositiveIntegerField(verbose_name="تعداد رزرو شده")
+    fulfilled_quantity = models.PositiveIntegerField(default=0, verbose_name="تعداد مصرف شده")
+    status = models.CharField(
+        max_length=20,
+        choices=ReservationStatus.choices,
+        default=ReservationStatus.ACTIVE,
+        db_index=True,
+        verbose_name="وضعیت رزرو"
+    )
+
+    class Meta:
+        verbose_name = 'رزرو موجودی'
+        verbose_name_plural = 'رزروهای موجودی'
+        indexes = [
+            models.Index(fields=['store', 'order_number', 'variant', 'warehouse']),
+        ]
+
+    @property
+    def remaining_active(self):
+        if self.status != ReservationStatus.ACTIVE:
+            return 0
+        return max(0, self.quantity - self.fulfilled_quantity)
+
+    def __str__(self):
+        return f"Reservation {self.order_number}: {self.quantity} x {self.variant.sku} ({self.status})"
+
+

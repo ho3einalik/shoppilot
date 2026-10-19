@@ -4,33 +4,39 @@ import random
 from decimal import Decimal, InvalidOperation
 from django.db import transaction, IntegrityError
 from django.utils import timezone
-from .models import Order, OrderItem, Customer, OrderStatus, PaymentStatus, FulfillmentStatus, OrderChannel
+from .models import Order, OrderItem, Customer, OrderStatus, PaymentStatus, FulfillmentStatus, OrderChannel, DailyOrderSequence
 from apps.catalog.models import ProductVariant
 from apps.inventory.models import Warehouse
 from apps.inventory.services import reserve_stock, release_stock_reservation, commit_stock_sale
 from apps.audit.services import record_audit_event
 
+@transaction.atomic
 def generate_order_number(store, *, _max_attempts=10):
-    """Generate a unique, human-readable order number that is safe under concurrent creation.
-
-    Format: ORD-YYYYMMDD-NNNN (per-store daily serial).
-    Strategy: use count()+1 as a candidate, but rely on the DB unique constraint to detect
-    collisions and retry with a random tie-break suffix. Bounded to _max_attempts iterations.
-    Requires: a unique_together or UniqueConstraint on (store, order_number) in the Order model.
+    """
+    Generate an atomic, monotonically increasing sequential order number per store and day.
+    Format: ORD-YYYYMMDD-XXXX (e.g. ORD-20261019-0001).
+    Guarantees O(1) time without table scans and strictly collision-free order numbers using row locks.
     """
     date_str = timezone.now().strftime('%Y%m%d')
-    for attempt in range(_max_attempts):
-        count = Order.objects.filter(store=store, created_at__date=timezone.now().date()).count() + 1 + attempt
-        # On collision retries, add a random offset to reduce thundering-herd re-collision
-        if attempt > 0:
-            count += random.randint(0, 9)
-        candidate = f"ORD-{date_str}-{count:04d}"
-        if not Order.objects.filter(store=store, order_number=candidate).exists():
-            return candidate
-    # Fallback: use timestamp + random to guarantee uniqueness
-    ts = timezone.now().strftime('%H%M%S')
-    rand = random.randint(100, 999)
-    return f"ORD-{date_str}-{ts}-{rand}"
+    seq_obj, _ = DailyOrderSequence.objects.select_for_update().get_or_create(
+        store=store,
+        date_key=date_str,
+        defaults={'last_seq': 0}
+    )
+    if seq_obj.last_seq == 0:
+        # Check highest existing order number for this date to avoid colliding with pre-existing numbers
+        prefix = f"ORD-{date_str}-"
+        existing = Order.objects.filter(store=store, order_number__startswith=prefix).order_by('-order_number').first()
+        if existing:
+            try:
+                suffix = existing.order_number.replace(prefix, '')
+                seq_obj.last_seq = max(seq_obj.last_seq, int(suffix))
+            except (ValueError, TypeError):
+                pass
+
+    seq_obj.last_seq += 1
+    seq_obj.save(update_fields=['last_seq', 'updated_at'])
+    return f"ORD-{date_str}-{seq_obj.last_seq:04d}"
 
 
 @transaction.atomic
@@ -206,34 +212,22 @@ def create_order(store, customer_data, items_data, warehouse, channel=OrderChann
         changes={'order_number': order.order_number, 'grand_total': str(order.grand_total)}
     )
 
-    import logging
-    _logger = logging.getLogger(__name__)
-
-    def _dispatch_order_created():
-        try:
-            from apps.automation.services import trigger_automation
-            from apps.automation.models import TriggerEvent
-            trigger_automation(
-                store=store,
-                trigger_event=TriggerEvent.ORDER_CREATED,
-                payload={
-                    'order_id': str(order.id),
-                    'order_number': order.order_number,
-                    'customer_name': customer.full_name,
-                    'customer_phone': customer.phone_number,
-                    'grand_total': float(order.grand_total),
-                    'items_count': len(items_data),
-                    'idempotency_key': f"order_created_{order.id}"
-                }
-            )
-        except Exception as exc:
-            _logger.error(
-                "Automation dispatch failed for ORDER_CREATED event",
-                exc_info=True,
-                extra={'order_id': str(order.id), 'error': str(exc)}
-            )
-
-    transaction.on_commit(_dispatch_order_created)
+    from apps.automation.services import publish_outbox_event
+    from apps.automation.models import TriggerEvent
+    publish_outbox_event(
+        store=store,
+        event_type=TriggerEvent.ORDER_CREATED,
+        payload={
+            'order_id': str(order.id),
+            'order_number': order.order_number,
+            'customer_name': customer.full_name,
+            'customer_phone': customer.phone_number,
+            'grand_total': float(order.grand_total),
+            'items_count': len(items_data),
+            'idempotency_key': f"order_created_{order.id}"
+        },
+        event_key=f"order_created_{order.id}"
+    )
     return order
 
 @transaction.atomic
@@ -273,31 +267,21 @@ def cancel_order(order, reason='', user=None):
         changes={'old_status': old_status, 'new_status': OrderStatus.CANCELLED, 'reason': reason}
     )
 
-    def _dispatch_order_cancelled():
-        import logging
-        _dlogger = logging.getLogger(__name__)
-        try:
-            from apps.automation.services import trigger_automation
-            from apps.automation.models import TriggerEvent
-            trigger_automation(
-                store=order.store,
-                trigger_event=TriggerEvent.ORDER_CANCELLED,
-                payload={
-                    'order_id': str(order.id),
-                    'order_number': order.order_number,
-                    'customer_name': order.customer.full_name,
-                    'customer_phone': order.customer.phone_number,
-                    'grand_total': float(order.grand_total),
-                    'idempotency_key': f"order_cancelled_{order.id}"
-                }
-            )
-        except Exception:
-            _dlogger.error(
-                "Automation dispatch failed for ORDER_CANCELLED order_id=%s",
-                order.id, exc_info=True
-            )
-
-    transaction.on_commit(_dispatch_order_cancelled)
+    from apps.automation.services import publish_outbox_event
+    from apps.automation.models import TriggerEvent
+    publish_outbox_event(
+        store=order.store,
+        event_type=TriggerEvent.ORDER_CANCELLED,
+        payload={
+            'order_id': str(order.id),
+            'order_number': order.order_number,
+            'customer_name': order.customer.full_name,
+            'customer_phone': order.customer.phone_number,
+            'grand_total': float(order.grand_total),
+            'idempotency_key': f"order_cancelled_{order.id}"
+        },
+        event_key=f"order_cancelled_{order.id}"
+    )
     return order
 
 @transaction.atomic
@@ -353,31 +337,21 @@ def fulfill_order(order, tracking_number='', shipping_cost=None, user=None):
         changes={'tracking_number': shipment.tracking_number}
     )
 
-    def _dispatch_order_fulfilled():
-        import logging
-        _dlogger = logging.getLogger(__name__)
-        try:
-            from apps.automation.services import trigger_automation
-            from apps.automation.models import TriggerEvent
-            trigger_automation(
-                store=order.store,
-                trigger_event=TriggerEvent.ORDER_FULFILLED,
-                payload={
-                    'order_id': str(order.id),
-                    'order_number': order.order_number,
-                    'customer_name': order.customer.full_name,
-                    'customer_phone': order.customer.phone_number,
-                    'tracking_number': shipment.tracking_number,
-                    'idempotency_key': f"order_fulfilled_{order.id}"
-                }
-            )
-        except Exception:
-            _dlogger.error(
-                "Automation dispatch failed for ORDER_FULFILLED order_id=%s",
-                order.id, exc_info=True
-            )
-
-    transaction.on_commit(_dispatch_order_fulfilled)
+    from apps.automation.services import publish_outbox_event
+    from apps.automation.models import TriggerEvent
+    publish_outbox_event(
+        store=order.store,
+        event_type=TriggerEvent.ORDER_FULFILLED,
+        payload={
+            'order_id': str(order.id),
+            'order_number': order.order_number,
+            'customer_name': order.customer.full_name,
+            'customer_phone': order.customer.phone_number,
+            'tracking_number': shipment.tracking_number,
+            'idempotency_key': f"order_fulfilled_{order.id}"
+        },
+        event_key=f"order_fulfilled_{order.id}"
+    )
     return order, shipment
 
 def import_orders_from_csv(store, file_content, user=None):

@@ -78,3 +78,41 @@ class AutomationExecutionLog(models.Model):
     def __str__(self):
         return f"Log: {self.rule.name} - {self.status} at {self.created_at}"
 
+
+class OutboxStatus(models.TextChoices):
+    PENDING = 'PENDING', 'در انتظار ارسال'
+    PROCESSING = 'PROCESSING', 'در حال پردازش'
+    DELIVERED = 'DELIVERED', 'تحویل شده'
+    FAILED = 'FAILED', 'ناموفق'
+
+
+class OutboxEvent(TenantScopedModel):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    event_type = models.CharField(max_length=50, db_index=True, verbose_name="نوع رویداد")
+    event_key = models.CharField(max_length=150, blank=True, db_index=True, verbose_name="شناسه یکتای رویداد")
+    payload = models.JSONField(default=dict, verbose_name="داده‌های رویداد")
+    status = models.CharField(
+        max_length=20,
+        choices=OutboxStatus.choices,
+        default=OutboxStatus.PENDING,
+        db_index=True,
+        verbose_name="وضعیت رویداد"
+    )
+    retry_count = models.IntegerField(default=0, verbose_name="تعداد تلاش‌ها")
+    max_retries = models.IntegerField(default=5, verbose_name="حداکثر دفعات تلاش")
+    last_error = models.TextField(blank=True, verbose_name="آخرین خطا")
+    next_retry_at = models.DateTimeField(null=True, blank=True, db_index=True, verbose_name="زمان تلاش مجدد")
+    processed_at = models.DateTimeField(null=True, blank=True, verbose_name="زمان تکمیل پردازش")
+
+    class Meta:
+        verbose_name = 'رویداد خروجی (Outbox)'
+        verbose_name_plural = 'رویدادهای خروجی (Outbox)'
+        ordering = ['created_at']
+        indexes = [
+            models.Index(fields=['status', 'next_retry_at']),
+        ]
+
+    def __str__(self):
+        return f"Outbox: {self.event_type} ({self.status}) - {self.id}"
+
+

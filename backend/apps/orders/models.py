@@ -138,3 +138,18 @@ class WooCommerceSyncLog(TenantScopedModel):
 
     def __str__(self):
         return f"{self.get_sync_type_display()} - {self.get_status_display()} ({self.items_synced} مورد)"
+
+
+class DailyOrderSequence(TenantScopedModel):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    date_key = models.CharField(max_length=8, db_index=True, verbose_name="کلید تاریخ (YYYYMMDD)")
+    last_seq = models.PositiveIntegerField(default=0, verbose_name="آخرین شماره ترتیبی")
+
+    class Meta:
+        verbose_name = 'توالی روزانه شماره سفارش'
+        verbose_name_plural = 'توالی‌های روزانه شماره سفارش'
+        unique_together = ('store', 'date_key')
+
+    def __str__(self):
+        return f"{self.store.name} - {self.date_key}: {self.last_seq}"
+

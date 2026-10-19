@@ -136,11 +136,30 @@ class PaymentTransactionViewSet(viewsets.ModelViewSet):
             except (Order.DoesNotExist, ValueError):
                 return Response({'error': 'سفارش یافت نشد.'}, status=status.HTTP_404_NOT_FOUND)
 
+            import datetime
+            from django.utils import timezone
+
+            now = timezone.now()
+            cutoff = now - datetime.timedelta(minutes=20)
+
+            # 1.1 Lazily expire stale pending payments (older than 20 mins) to release locked payable amounts
+            stale_pendings = list(order.payments.select_for_update().filter(
+                status=PaymentVerificationStatus.PENDING_VERIFICATION,
+                created_at__lt=cutoff
+            ))
+            for sp in stale_pendings:
+                sp.status = PaymentVerificationStatus.EXPIRED
+                sp.rejection_reason = "انقضای خودکار مهلت پرداخت به دلیل عدم تکمیل کاربر در بازه ۲۰ دقیقه"
+                sp.save(update_fields=['status', 'rejection_reason', 'updated_at'])
+
             verified_sum = sum(
                 p.amount for p in order.payments.filter(status=PaymentVerificationStatus.VERIFIED)
             )
             pending_sum = sum(
-                p.amount for p in order.payments.filter(status=PaymentVerificationStatus.PENDING_VERIFICATION)
+                p.amount for p in order.payments.filter(
+                    status=PaymentVerificationStatus.PENDING_VERIFICATION,
+                    created_at__gte=cutoff
+                )
             )
 
             if verified_sum >= order.grand_total:
@@ -207,8 +226,13 @@ class PaymentTransactionViewSet(viewsets.ModelViewSet):
         if not result.get('success'):
             with transaction.atomic():
                 p = PaymentTransaction.objects.select_for_update().get(id=payment.id)
-                p.status = PaymentVerificationStatus.REJECTED
-                p.rejection_reason = result.get('message', 'خطای درگاه در ایجاد تراکنش')
+                # Network communication error / timeout: set EXPIRED (recoverable / releases pending sum), NOT irreversible REJECTED
+                if result.get('status') == 'COMMUNICATION_ERROR':
+                    p.status = PaymentVerificationStatus.EXPIRED
+                    p.rejection_reason = "خطای تایم‌اوت ارتباط با درگاه در مرحله ایجاد تراکنش؛ رزرو باقیمانده آزاد شد تا کاربر بتواند مجدداً تلاش کند."
+                else:
+                    p.status = PaymentVerificationStatus.REJECTED
+                    p.rejection_reason = result.get('message', 'خطای درگاه در ایجاد تراکنش')
                 p.save(update_fields=['status', 'rejection_reason', 'updated_at'])
 
             status_code = status.HTTP_400_BAD_REQUEST if result.get('status') in ['REQUIRES_GATEWAY_CONFIG', 'INVALID_AMOUNT'] else status.HTTP_502_BAD_GATEWAY
@@ -354,7 +378,7 @@ class PaymentTransactionViewSet(viewsets.ModelViewSet):
                 'status': 'ALREADY_REJECTED'
             }, status=status.HTTP_400_BAD_REQUEST)
 
-        if payment.status != PaymentVerificationStatus.PENDING_VERIFICATION:
+        if payment.status not in [PaymentVerificationStatus.PENDING_VERIFICATION, PaymentVerificationStatus.EXPIRED]:
             return Response({
                 'success': False,
                 'error': f'وضعیت فعلی تراکنش ({payment.status}) جهت تایید معتبر نیست.',
@@ -384,8 +408,8 @@ class PaymentTransactionViewSet(viewsets.ModelViewSet):
         if res.success:
             with transaction.atomic():
                 p = PaymentTransaction.objects.select_for_update().get(id=payment.id)
-                if p.status == PaymentVerificationStatus.PENDING_VERIFICATION:
-                    p.tracking_code = res.tracking_code
+                if p.status in [PaymentVerificationStatus.PENDING_VERIFICATION, PaymentVerificationStatus.EXPIRED]:
+                    p.tracking_code = str(res.tracking_code or '')
                     p.save(update_fields=['tracking_code'])
                     verified = verify_payment_transaction(payment=p, user=request.user if request.user.is_authenticated else None)
                 else:
@@ -411,7 +435,7 @@ class PaymentTransactionViewSet(viewsets.ModelViewSet):
             # Gateway definitively rejected. Only now mark REJECTED — never based on user-supplied params alone.
             with transaction.atomic():
                 p = PaymentTransaction.objects.select_for_update().get(id=payment.id)
-                if p.status == PaymentVerificationStatus.PENDING_VERIFICATION:
+                if p.status in [PaymentVerificationStatus.PENDING_VERIFICATION, PaymentVerificationStatus.EXPIRED]:
                     if user_claimed_cancelled:
                         p.rejection_reason = "تراکنش توسط کاربر لغو شد و درگاه آن را تأیید نکرد."
                     else:

@@ -122,32 +122,22 @@ def create_return_request(
         changes={'rma_number': rma.rma_number, 'order': order.order_number, 'refund_amount': str(total_refund)}
     )
 
-    def _dispatch_return_requested():
-        import logging
-        _dlogger = logging.getLogger(__name__)
-        try:
-            from apps.automation.services import trigger_automation
-            from apps.automation.models import TriggerEvent
-            trigger_automation(
-                store=order.store,
-                trigger_event=TriggerEvent.RETURN_REQUESTED,
-                payload={
-                    'rma_id': str(rma.id),
-                    'rma_number': rma.rma_number,
-                    'order_number': order.order_number,
-                    'customer_name': order.customer.full_name,
-                    'customer_phone': order.customer.phone_number,
-                    'refund_amount': float(rma.refund_amount),
-                    'idempotency_key': f"return_requested_{rma.id}"
-                }
-            )
-        except Exception:
-            _dlogger.error(
-                "Automation dispatch failed for RETURN_REQUESTED rma_id=%s",
-                rma.id, exc_info=True
-            )
-
-    transaction.on_commit(_dispatch_return_requested)
+    from apps.automation.services import publish_outbox_event
+    from apps.automation.models import TriggerEvent
+    publish_outbox_event(
+        store=order.store,
+        event_type=TriggerEvent.RETURN_REQUESTED,
+        payload={
+            'rma_id': str(rma.id),
+            'rma_number': rma.rma_number,
+            'order_number': order.order_number,
+            'customer_name': order.customer.full_name,
+            'customer_phone': order.customer.phone_number,
+            'refund_amount': float(rma.refund_amount),
+            'idempotency_key': f"return_requested_{rma.id}"
+        },
+        event_key=f"return_requested_{rma.id}"
+    )
     return rma
 
 @transaction.atomic

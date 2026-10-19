@@ -1,7 +1,12 @@
+import datetime
+import logging
+from django.db import models
 from django.utils import timezone
-from .models import AutomationRule, AutomationExecutionLog, ExecutionStatus
+from .models import AutomationRule, AutomationExecutionLog, ExecutionStatus, OutboxEvent, OutboxStatus
 from apps.tasks.models import Task, TaskPriority, TaskStatus
 from apps.features.adapters import get_integration_adapter
+
+_logger = logging.getLogger(__name__)
 
 def evaluate_conditions(conditions, payload):
     """Evaluate whether the event payload meets the rule conditions"""
@@ -168,4 +173,101 @@ def trigger_automation(store, trigger_event, payload, dry_run=False):
             log_entry.save(update_fields=['status', 'details'])
 
     return executed_count
+
+
+def publish_outbox_event(store, event_type, payload, event_key='', max_retries=5):
+    """
+    Transactional Outbox Publisher.
+    Persists the automation event atomically inside the current database transaction.
+    Guarantees at-least-once delivery: even if server restarts or network drops immediately,
+    the event is safely recorded in the Outbox and will be processed.
+    Also schedules an immediate on_commit trigger for minimal latency.
+    """
+    event = OutboxEvent.objects.create(
+        store=store,
+        event_type=event_type,
+        event_key=event_key or payload.get('idempotency_key', '') or '',
+        payload=payload,
+        status=OutboxStatus.PENDING,
+        max_retries=max_retries
+    )
+
+    event_id = event.id
+
+    def _immediate_dispatch():
+        try:
+            process_outbox_event(event_id)
+        except Exception:
+            _logger.warning("Immediate outbox dispatch for event %s failed; worker will retry.", event_id, exc_info=True)
+
+    transaction.on_commit(_immediate_dispatch)
+    return event
+
+
+@transaction.atomic
+def process_outbox_event(event_id):
+    """
+    Processes a single OutboxEvent atomically with idempotency and exponential backoff retry.
+    """
+    try:
+        event = OutboxEvent.objects.select_for_update().get(id=event_id)
+    except OutboxEvent.DoesNotExist:
+        return None
+
+    if event.status == OutboxStatus.DELIVERED:
+        return event
+
+    event.status = OutboxStatus.PROCESSING
+    event.save(update_fields=['status', 'updated_at'])
+
+    try:
+        trigger_automation(
+            store=event.store,
+            trigger_event=event.event_type,
+            payload=event.payload,
+            dry_run=False
+        )
+        event.status = OutboxStatus.DELIVERED
+        event.processed_at = timezone.now()
+        event.last_error = ''
+        event.save(update_fields=['status', 'processed_at', 'last_error', 'updated_at'])
+    except Exception as exc:
+        event.retry_count += 1
+        event.last_error = str(exc)
+        if event.retry_count >= event.max_retries:
+            event.status = OutboxStatus.FAILED
+            event.next_retry_at = None
+        else:
+            event.status = OutboxStatus.PENDING
+            # Exponential backoff: 10s * (2 ** retry_count)
+            delay_seconds = 10 * (2 ** (event.retry_count - 1))
+            event.next_retry_at = timezone.now() + datetime.timedelta(seconds=delay_seconds)
+        event.save(update_fields=['status', 'retry_count', 'last_error', 'next_retry_at', 'updated_at'])
+        _logger.error("OutboxEvent %s failed (attempt %d/%d): %s", event_id, event.retry_count, event.max_retries, exc)
+
+    return event
+
+
+def process_pending_outbox_events(limit=50):
+    """
+    Scans and processes pending or failed retryable Outbox events.
+    Called by background Celery worker or cron task.
+    """
+    now = timezone.now()
+    pending_ids = list(
+        OutboxEvent.objects.filter(
+            status__in=[OutboxStatus.PENDING, OutboxStatus.FAILED],
+            retry_count__lt=models.F('max_retries')
+        ).filter(
+            models.Q(next_retry_at__isnull=True) | models.Q(next_retry_at__lte=now)
+        ).order_by('created_at').values_list('id', flat=True)[:limit]
+    )
+
+    processed_count = 0
+    for eid in pending_ids:
+        process_outbox_event(eid)
+        processed_count += 1
+
+    return processed_count
+
 
