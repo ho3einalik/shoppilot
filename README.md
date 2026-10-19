@@ -1,60 +1,154 @@
 # ShopPilot (شاپ‌پایلوت) 🚀
-
-ShopPilot is a production-oriented, modular, multi-tenant SaaS platform engineered for managing and optimizing multi-channel online and social commerce businesses (Instagram, Telegram, WooCommerce, physical stores).
-
-> 📖 **مستند کامل قابلیت‌ها و امکانات:** برای مطالعه فهرست کامل و جزییات تمامی ماژول‌ها و امکانات اضافه شده، فایل [FEATURES.md](./FEATURES.md) را مشاهده فرمایید.
+### پلتفرم ابری یکپارچه مدیریت زنجیره ارزش تجارت اجتماعی، انبارداری و خرده‌فروشی چندکاناله
+**Production-Grade Multi-Tenant SaaS Platform for E-Commerce, Social Commerce & Omni-Channel Retail**
 
 ---
 
-## Key Modules & Capabilities
-
-- **External Integrations Center (مرکز اتصال‌ها):** Centralized, encrypted management of SMS (Kavenegar), Instagram Meta Graph API, Zarinpal payment gateway, Iran Post/Tipax shipping, Gemini AI, and SMTP email with server-side live testing and SSRF protection.
-- **Multi-Tenancy & RBAC:** Multi-business, multi-store architecture with strict data isolation, role-based access control, and audit logs.
-- **Product Catalog:** Products, variants (SKU/barcodes), categories, cost & retail price tracking in Iranian Toman (IRT) and Rial (IRR).
-- **Inventory & Warehouses:** Concurrency-safe stock management, multi-warehouse support, atomic reservations, double-entry inventory ledger.
-- **Orders & Multi-Channel Fulfillment:** Unified orders, state transitions, shipments with tracking numbers, packing slips, and CSV imports.
-- **Payments & Verification:** Gateways, payment links, and a dedicated review workflow for manual card-to-card transfers.
-- **Daily Action Center:** Actionable alerts (stockouts, pending approvals, fulfillment delays) backed by evidence.
-- **Sales & Profit Analytics:** Real-time metrics with historical cost snapshots to calculate true gross profit.
-- **Persian RTL Frontend:** Next.js 14 dashboard with native right-to-left UI, Persian typography, and responsive views.
+[![Backend Tests](https://img.shields.io/badge/Backend%20Tests-161%20Passed-emerald.svg)](./backend)
+[![Frontend Status](https://img.shields.io/badge/Frontend-Next.js%2014%20(App%20Router)-blue.svg)](./frontend)
+[![Python](https://img.shields.io/badge/Python-3.13-blue.svg)](https://www.python.org/)
+[![Django](https://img.shields.io/badge/Django-5.x%20%7C%20DRF-green.svg)](https://www.djangoproject.com/)
+[![License](https://img.shields.io/badge/License-Proprietary-amber.svg)](#)
 
 ---
 
-## Tech Stack
+## 🌟 معرفی پلتفرم (Overview)
 
-- **Backend:** Python 3.13, Django 5.x, Django REST Framework, SimpleJWT, Celery/Redis.
-- **Frontend:** Next.js 14 (App Router), React, TypeScript, Tailwind CSS, Lucide Icons, RTL support.
-- **Database:** PostgreSQL (with SQLite development fallback).
-- **Testing:** Pytest with extensive tenant isolation and concurrency tests.
+**ShopPilot** یک بستر یکپارچه و مدرن ابری (SaaS) است که با هدف توانمندسازی آنلاین‌شاپ‌ها، برندهای سوشال‌کامرس (اینستاگرام و تلگرام)، فروشگاه‌های اینترنتی و شعب فیزیکی طراحی شده است. این پلتفرم تمامی ارکان یک کسب‌وکار را — از تامین و انبارداری چندگانه تا ثبت سفارش، کارتابل تایید فیش کارت‌به‌کارت، درگاه پرداخت آنلاین، لجستیک و محاسبه سود خالص واقعی (P&L) — در یک محیط یکدست و هماهنگ گرد هم آورده است.
+
+> 📖 **مستند تفصیلی قابلیت‌ها:** برای مطالعه شرح فنی و کاربردی هر ۲۱ سرفصل سیستم، فایل [FEATURES.md](./FEATURES.md) را مشاهده فرمایید.  
+> 🎓 **راهنمای درون‌برنامه‌ای:** آموزش گام‌به‌گام و ترفندهای تمام ماژول‌ها در مسیر `/settings/guide` در دسترس است.
 
 ---
 
-## Quickstart
+## 🧭 ماژول‌های اصلی سیستم (Modules Directory)
 
-### Prerequisites
-- Python 3.11+
-- Node.js 18+ and npm
-- (Optional) Docker & Docker Compose
+پلتفرم شاپ‌پایلوت شامل ۱۶ ماژول اصلی و هماهنگ است:
 
-### 1. Backend Setup
+| # | ماژول | مسیر (Route) | کارکرد و هدف اصلی |
+|---|---|---|---|
+| **۱** | **داشبورد عملیات روزانه** | `/` | دیده‌بان زنده وضعیت فروش، اقدامات فوری، کالاهای رو به پایان و هشدارهای زنجیره تامین |
+| **۲** | **کاتالوگ و محصولات** | `/products` | مدیریت کالاها، رنگ‌بندی، سایزها، کدهای SKU، بارکد، قیمت خرید و فروش با حاشیه سود |
+| **۳** | **موجودی و انبارداری** | `/inventory` | مدیریت چند انبار، رزرو خودکار با قفل اتمیک، حواله انتقال بین‌انباری و انبارگردانی |
+| **۴** | **مدیریت سفارشات** | `/orders` | دریافت یکپارچه سفارشات سایت، اینستاگرام و تلفنی، صدور فاکتور و برچسب پستی |
+| **۵** | **صندوق حضوری و B2B** | `/pos` | رابط لمسی پای صندوق مغازه، اسکن بارکد، تسویه کارتخوان و صدور فاکتور همکار عمده |
+| **۶** | **مرجوعی‌ها و RMA** | `/returns` | کارشناسی سلامت کالای عودتی، تعویض سایز/مدل و مدیریت استرداد وجه مشتری |
+| **۷** | **تامین‌کنندگان و خرید** | `/suppliers` | ثبت کارگاه‌ها و بنکداران، سفارشات خرید عمده (PO) و میانگین موزون بهای تمام‌شده |
+| **۸** | **تأیید فیش واریزی و مالی** | `/payments` | کارتابل تطبیق کارت‌به‌کارت، ضداضافه‌پرداخت، استرداد خودکار و صورت سود و زیان (P&L) |
+| **۹** | **مشتریان و پیام‌ها (CRM)** | `/crm` | پرونده مشتری، ارزش چرخه عمر (CLV)، بخش‌بندی RFM و صندوق پیام‌های دایرکت |
+| **۱۰** | **کارتابل و وظایف تیم** | `/tasks` | تقسیم کارهای روزمره بین پرسنل با برد کانبان، تعیین ددلاین و یادآوری‌ها |
+| **۱۱** | **تقویم محتوا و رسانه‌ها** | `/social/calendar` | زمان‌بندی پست، ریلز و استوری اینستاگرام و همگام‌سازی تبلیغات با موجودی انبار |
+| **۱۲** | **تخفیف‌ها و اتوماسیون** | `/marketing` | ساخت کدهای تخفیف درصدی/مبلغی و قواعد اتوماسیون رویدادمحور بر پایه Outbox |
+| **۱۳** | **هوش تجاری و پیش‌بینی** | `/intelligence` | پیش‌بینی اتمام موجودی، تحلیل کالاهای راکد (Dead Stock) و تحلیل سود واقعی |
+| **۱۴** | **تیم و سطوح دسترسی** | `/team` | تعیین نقش‌های سازمانی (مالک، مدیر، انباردار، صندوقدار) با تفکیک دقیق اختیارات |
+| **۱۵** | **مرکز اتصال‌های خارجی** | `/settings/integrations` | راه‌اندازی و تست زنده پیامک کاوه‌نگار، زرین‌پال، پست/تیپاکس، اینستاگرام و Gemini |
+| **۱۶** | **تنظیمات و ماژول‌ها** | `/settings/features` | فعال‌سازی ماژولار قابلیت‌ها، مدیریت اشتراک SaaS و راهنمای جامع پلتفرم |
+
+---
+
+## 🛡️ استانداردهای مهندسی نرم‌افزار و قابلیت اطمینان (Engineering & Resilience)
+
+1. **الگوی تضمین تحویل رویداد (Transactional Outbox Pattern & DLQ):**  
+   تمام رویدادهای سیستمی (مانند ارسال پیامک یا نوتیفیکیشن) به‌صورت اتمیک درون همان تراکنش دیتابیس ثبت می‌شوند. شکست سرویس‌های خارجی پس از تلاش‌های متوالی با Exponential Backoff به صف پیام‌های مرده (`DEAD_LETTER`) منتقل شده و امکان Replay دستی یا دسته‌ای دارد.
+2. **محاسبه مانده خالص و محافظت ضداضافه‌پرداخت (Anti-Overpayment & Net Paid):**  
+   محاسبه مانده پرداختی سفارش همواره بر اساس خالص دریافتی (`amount - refunded_amount`) محاسبه می‌شود. در سناریوهای رقابت همزمان (Race Conditions) و کال‌بک‌های دیرهنگام، اضافه‌پرداخت شناسایی و با علامت‌گذاری در صف استرداد خودکار قرار می‌گیرد.
+3. **دفترکل دوطرفه انبارداری (Double-Entry Inventory Ledger):**  
+   هیچ تغییری در موجودی انبار بدون ثبت سند دفتری معتبر رخ نمی‌دهد. موجودی رزروشده هنگام پرداخت آنلاین مسدود شده و مانع از فروش تکراری (Overselling) در جشنواره‌ها می‌شود.
+4. **حسابرسی سازمانی و امنیت چندمستأجره (Multi-Tenancy & Audit Trails):**  
+   تفکیک مطلق داده‌های هر شعبه بر اساس هدر امنیتی `x-store-id`، احراز هویت JWT با رفرش توکن، محافظت ضد SSRF در وب‌سرویس‌های خارجی و ثبت لاگ ردپای امنیتی تمام اقدامات پرسنل.
+
+---
+
+## 💻 استک فنی (Tech Stack)
+
+* **بک‌اند (Backend):**
+  * Python 3.13 & Django 5.x
+  * Django REST Framework (DRF)
+  * SimpleJWT Authentication
+  * Celery & Redis برای پردازش‌های پس‌زمینه و زمان‌بندی دوره‌ای Celery Beat
+  * SQLite (توسعه و تست محلی) / PostgreSQL (محیط عملیاتی)
+* **فرانت‌اند (Frontend):**
+  * Next.js 14 (App Router) & React 18
+  * TypeScript & Tailwind CSS
+  * طراحی بومی راست‌به‌چپ (RTL) با فونت استاندارد وزیرمتن (Vazirmatn)
+  * طراحی گلس‌مورفیسم پیشرفته با تم دوگانه تاریک (Dark Mode) و روشن (Light Mode)
+  * کتابخانه آیکون‌های استاندارد Lucide Icons
+
+---
+
+## 🚀 راهنمای راه‌اندازی و اجرا (Quickstart)
+
+### ۱. پیش‌نیازها
+* Python 3.11+
+* Node.js 18+ و npm
+* Redis (جهت اجرای صف‌های Celery)
+
+### ۲. راه‌اندازی بک‌اند (Django REST API)
 ```bash
+# رفتن به پوشه بک‌اند
 cd backend
-python -m venv venv
-# On Windows:
-.\venv\Scripts\activate
-# On Linux/macOS:
-source venv/bin/activate
 
+# ایجاد و فعال‌سازی محیط مجازی
+python -m venv venv
+.\venv\Scripts\activate   # در ویندوز
+# source venv/bin/activate # در لینوکس و مک
+
+# نصب وابستگی‌ها
 pip install -r requirements.txt
+
+# اعمال مایگریشن‌ها
 python manage.py migrate
+
+# ایجاد داده‌های آزمایشی واقع‌گرایانه (فروشگاه لوتوس)
 python manage.py seed_demo_data
-python manage.py runserver 8000
+
+# اجرای سرور توسعه
+python manage.py runserver 127.0.0.1:8000
 ```
 
-### 2. Frontend Setup
+### ۳. اجرای کارهای دوره‌ای Celery (اختیاری در توسعه)
 ```bash
+# در ترمینال مجزا
+celery -A config worker -l info
+celery -A config beat -l info
+```
+
+### ۴. راه‌اندازی فرانت‌اند (Next.js)
+```bash
+# رفتن به پوشه فرانت‌اند
 cd frontend
+
+# نصب پکیج‌ها
 npm install
+
+# اجرای سرور توسعه
 npm run dev
 ```
-Open [http://localhost:3000](http://localhost:3000) to access the ShopPilot cockpit.
+
+---
+
+## 🔑 مشخصات ورود به حساب کاربری دمو (Demo Credentials)
+
+* **آدرس پنل مدیریت:** [http://localhost:3000](http://localhost:3000)
+* **مستندات تعاملی API (Swagger):** [http://127.0.0.1:8000/api/docs/](http://127.0.0.1:8000/api/docs/)
+* **پنل جنگو ادمین:** [http://127.0.0.1:8000/admin/](http://127.0.0.1:8000/admin/)
+* **ایمیل ورود:** `demo@shoppilot.io`
+* **شماره موبایل:** `09121112233`
+* **کلمه عبور:** `password123`
+* **دسترسی:** مالک سیستم / مدیر ارشد (Superuser) با دسترسی کامل به داده‌های فروشگاه نمونه لوتوس
+
+---
+
+## 🧪 اجرای آزمون‌ها (Testing)
+
+پروژه دارای پوشش تستی جامع برای اعتبارسنجی ایزولاسیون چندمستأجره، قفل اتمیک انبار، تطبیق پرداخت‌ها و صف رویدادها است:
+
+```bash
+cd backend
+pytest
+```
+*خروجی مورد انتظار: ۱۶۱ تست موفق (100% Pass).*
+
+---
+
+*توسعه‌یافته با ❤️ برای توانمندسازی تجارت الکترونیک و آنلاین‌شاپ‌های پیشرو.*

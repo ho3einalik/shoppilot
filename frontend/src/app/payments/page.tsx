@@ -372,7 +372,7 @@ export default function PaymentsAndFinancePage() {
                     <span>فروش ناخالص (Gross Sales)</span>
                     <TrendingUp className="w-4 h-4 text-emerald-400" />
                   </div>
-                  <div className="text-2xl font-black text-white font-mono">
+                  <div className="text-2xl font-black text-white">
                     {formatCurrency(statement?.gross_sales || 0, currency)}
                   </div>
                   <div className="text-[11px] text-slate-500">
@@ -386,7 +386,7 @@ export default function PaymentsAndFinancePage() {
                     <span>بهای تمام‌شده کالا (COGS)</span>
                     <Layers className="w-4 h-4 text-amber-400" />
                   </div>
-                  <div className="text-2xl font-black text-amber-400 font-mono">
+                  <div className="text-2xl font-black text-amber-400">
                     {formatCurrency(statement?.cogs || 0, currency)}
                   </div>
                   <div className="text-[11px] text-slate-500">
@@ -400,7 +400,7 @@ export default function PaymentsAndFinancePage() {
                     <span>هزینه‌های جاری (Opex)</span>
                     <TrendingDown className="w-4 h-4 text-rose-400" />
                   </div>
-                  <div className="text-2xl font-black text-rose-400 font-mono">
+                  <div className="text-2xl font-black text-rose-400">
                     {formatCurrency(statement?.total_operating_expenses || 0, currency)}
                   </div>
                   <div className="text-[11px] text-slate-500">
@@ -420,13 +420,13 @@ export default function PaymentsAndFinancePage() {
                     <DollarSign className="w-4 h-4 text-emerald-400" />
                   </div>
                   <div className={cn(
-                    "text-2xl font-black font-mono",
+                    "text-2xl font-black",
                     (statement?.net_operating_profit || 0) >= 0 ? "text-emerald-300" : "text-rose-400"
                   )}>
                     {formatCurrency(statement?.net_operating_profit || 0, currency)}
                   </div>
                   <div className="text-[11px] text-slate-400">
-                    حاشیه سود خالص: <span className="font-bold text-white font-mono">{statement?.net_margin_percent || 0}٪</span>
+                    حاشیه سود خالص: <span className="font-bold text-white">{statement?.net_margin_percent || 0}٪</span>
                   </div>
                 </div>
               </div>
@@ -444,7 +444,7 @@ export default function PaymentsAndFinancePage() {
                     {Object.entries(statement?.expenses_by_category || {}).map(([cat, amount]) => (
                       <div key={cat} className="p-4 bg-white/[0.02] border border-white/[0.04] rounded-2xl space-y-1">
                         <span className="text-[11px] text-slate-400">{getCategoryLabel(cat)}</span>
-                        <div className="text-base font-bold text-white font-mono">
+                        <div className="text-base font-bold text-white">
                           {formatCurrency(Number(amount), currency)}
                         </div>
                       </div>
@@ -503,11 +503,11 @@ export default function PaymentsAndFinancePage() {
                           {exp.category_display || getCategoryLabel(exp.category)}
                         </span>
                       </td>
-                      <td className="py-4 px-6 font-bold font-mono text-white text-sm">
+                      <td className="py-4 px-6 font-bold text-white text-sm">
                         {formatCurrency(exp.amount, currency)}
                       </td>
-                      <td className="py-4 px-6 text-slate-400 font-mono">
-                        {exp.expense_date}
+                      <td className="py-4 px-6 text-slate-400">
+                        {formatDate(exp.expense_date)}
                       </td>
                       <td className="py-4 px-6 text-slate-300">
                         {exp.vendor_or_payee || '-'}
@@ -567,10 +567,10 @@ export default function PaymentsAndFinancePage() {
                   payments.map((p) => (
                     <tr key={p.id} className="hover:bg-white/[0.02] transition">
                       <td className="py-4 px-6">
-                        <div className="font-bold font-mono text-white text-sm">{p.order_number}</div>
+                        <div className="font-bold text-white text-sm">{p.order_number}</div>
                         <div className="text-[11px] text-slate-400 mt-0.5">{p.customer_name} &bull; {formatDate(p.created_at)}</div>
                       </td>
-                      <td className="py-4 px-6 font-bold font-mono text-emerald-400 text-sm">
+                      <td className="py-4 px-6 font-bold text-emerald-400 text-sm">
                         {formatCurrency(p.amount, currency)}
                       </td>
                       <td className="py-4 px-6 text-slate-300">
@@ -578,7 +578,7 @@ export default function PaymentsAndFinancePage() {
                           {p.method_display}
                         </span>
                       </td>
-                      <td className="py-4 px-6 text-slate-400 font-mono">
+                      <td className="py-4 px-6 text-slate-400">
                         {p.payer_card_mask ? `کارت: ${p.payer_card_mask}` : p.tracking_code || '-'}
                       </td>
                       <td className="py-4 px-6 text-center">
@@ -669,18 +669,18 @@ export default function PaymentsAndFinancePage() {
                 {settlements.map((s) => (
                   <tr key={s.id} className="hover:bg-white/[0.02]">
                     <td className="py-3 px-4 font-semibold text-white">{s.gateway_name}</td>
-                    <td className="py-3 px-4 text-slate-300">{s.settlement_date}</td>
-                    <td className="py-3 px-4 font-mono text-slate-300">
-                      {Number(s.gross_amount).toLocaleString('fa-IR')} ت
+                    <td className="py-3 px-4 text-slate-300">{formatDate(s.settlement_date)}</td>
+                    <td className="py-3 px-4 text-slate-300">
+                      {formatCurrency(s.gross_amount, currency)}
                     </td>
-                    <td className="py-3 px-4 font-mono text-rose-400">
-                      {Number(s.gateway_fee).toLocaleString('fa-IR')} ت
+                    <td className="py-3 px-4 text-rose-400">
+                      {formatCurrency(s.gateway_fee, currency)}
                     </td>
-                    <td className="py-3 px-4 font-mono text-emerald-400 font-bold">
-                      {Number(s.net_deposited_amount).toLocaleString('fa-IR')} ت
+                    <td className="py-3 px-4 text-emerald-400 font-bold">
+                      {formatCurrency(s.net_deposited_amount, currency)}
                     </td>
-                    <td className="py-3 px-4 font-mono text-slate-400">{s.sheba_number || '-'}</td>
-                    <td className="py-3 px-4 font-mono text-blue-400">{s.tracking_reference || '-'}</td>
+                    <td className="py-3 px-4 text-slate-400">{s.sheba_number || '-'}</td>
+                    <td className="py-3 px-4 text-blue-400">{s.tracking_reference || '-'}</td>
                     <td className="py-3 px-4">
                       {s.is_reconciled ? (
                         <span className="px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 text-[11px]">
@@ -750,16 +750,16 @@ export default function PaymentsAndFinancePage() {
                       )}
                     </td>
                     <td className="py-3 px-4 font-semibold text-white">{d.title}</td>
-                    <td className="py-3 px-4 font-mono text-slate-300">
-                      {Number(d.total_amount).toLocaleString('fa-IR')} ت
+                    <td className="py-3 px-4 text-slate-300">
+                      {formatCurrency(d.total_amount, currency)}
                     </td>
-                    <td className="py-3 px-4 font-mono text-emerald-400">
-                      {Number(d.paid_amount).toLocaleString('fa-IR')} ت
+                    <td className="py-3 px-4 text-emerald-400">
+                      {formatCurrency(d.paid_amount, currency)}
                     </td>
-                    <td className="py-3 px-4 font-mono text-amber-400 font-bold">
-                      {Number(d.remaining_balance).toLocaleString('fa-IR')} ت
+                    <td className="py-3 px-4 text-amber-400 font-bold">
+                      {formatCurrency(d.remaining_balance, currency)}
                     </td>
-                    <td className="py-3 px-4 text-slate-400">{d.due_date || 'نامشخص'}</td>
+                    <td className="py-3 px-4 text-slate-400">{d.due_date ? formatDate(d.due_date) : 'نامشخص'}</td>
                     <td className="py-3 px-4">
                       <span className="px-2 py-0.5 rounded-full bg-white/[0.06] text-slate-300 text-[11px]">
                         {d.status_display}

@@ -1,10 +1,11 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useAuth } from '@/contexts/AuthContext';
 import { useStore } from '@/contexts/StoreContext';
 import { Store, User, LogOut, Bell, ChevronDown, Sparkles, Check, CheckCheck, X } from 'lucide-react';
 import { api } from '@/lib/api';
+import { cn } from '@/lib/utils';
 
 export function Navbar() {
   const { user, logout } = useAuth();
@@ -12,6 +13,18 @@ export function Navbar() {
 
   const [notifications, setNotifications] = useState<any[]>([]);
   const [showNotifications, setShowNotifications] = useState(false);
+  const [showStoreDropdown, setShowStoreDropdown] = useState(false);
+  const storeDropdownRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (storeDropdownRef.current && !storeDropdownRef.current.contains(event.target as Node)) {
+        setShowStoreDropdown(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
 
   useEffect(() => {
     if (user && activeStore) {
@@ -63,22 +76,93 @@ export function Navbar() {
           </span>
         </div>
 
-        {/* Store Switcher */}
+        {/* Custom Modern Store Switcher */}
         {stores.length > 0 && (
-          <div className="relative flex items-center bg-white/[0.03] border border-white/[0.08] hover:border-white/20 transition-all rounded-xl px-3 py-1.5">
-            <Store className="w-4 h-4 text-cyan-400 ml-2" />
-            <select
-              value={activeStore?.id || ''}
-              onChange={(e) => switchStore(e.target.value)}
-              className="bg-transparent text-slate-200 text-xs font-medium cursor-pointer focus:outline-none appearance-none pr-1 pl-4"
+          <div className="relative" ref={storeDropdownRef}>
+            <button
+              type="button"
+              onClick={() => setShowStoreDropdown(!showStoreDropdown)}
+              className={cn(
+                'flex items-center gap-2.5 bg-white/[0.04] dark:bg-white/[0.04] light:bg-slate-100 border border-white/[0.08] dark:border-white/[0.08] light:border-slate-200 hover:border-cyan-500/40 hover:bg-white/[0.07] light:hover:bg-slate-200 transition-all rounded-xl px-3 py-1.5 cursor-pointer shadow-sm',
+                showStoreDropdown && 'border-cyan-500/50 bg-white/[0.08]'
+              )}
             >
-              {stores.map((s) => (
-                <option key={s.id} value={s.id} className="bg-[#0b101d] text-slate-200">
-                  {s.name} ({s.currency === 'IRT' ? 'تومان' : 'ریال'})
-                </option>
-              ))}
-            </select>
-            <ChevronDown className="w-3.5 h-3.5 text-slate-400 pointer-events-none absolute left-2.5" />
+              <div className="w-5 h-5 rounded-lg bg-gradient-to-tr from-cyan-500/20 to-blue-500/20 border border-cyan-500/30 text-cyan-400 flex items-center justify-center shrink-0">
+                <Store className="w-3.5 h-3.5" />
+              </div>
+              <span className="text-slate-200 light:text-slate-800 text-xs font-semibold">
+                {activeStore?.name || 'انتخاب شعبه'}
+              </span>
+              <span className="text-[10px] font-mono text-cyan-400/80 bg-cyan-500/10 px-1.5 py-0.5 rounded-md hidden sm:inline-block">
+                {activeStore?.currency === 'IRT' ? 'تومان' : 'ریال'}
+              </span>
+              <ChevronDown
+                className={cn(
+                  'w-3.5 h-3.5 text-slate-400 transition-transform duration-200',
+                  showStoreDropdown && 'rotate-180 text-cyan-400'
+                )}
+              />
+            </button>
+
+            {/* Custom Glassmorphism Dropdown */}
+            {showStoreDropdown && (
+              <div className="absolute right-0 top-full mt-2 w-72 bg-[#0c1324]/95 dark:bg-[#0c1324]/95 light:bg-white backdrop-blur-2xl border border-white/10 dark:border-white/10 light:border-slate-200 rounded-2xl shadow-[0_20px_50px_rgba(0,0,0,0.5)] p-2 z-50 space-y-1 animate-in fade-in zoom-in-95 text-right">
+                <div className="px-3 py-2 text-[11px] font-bold text-slate-400 light:text-slate-500 border-b border-white/[0.06] light:border-slate-100 flex items-center justify-between">
+                  <span>فروشگاه‌ها و شعب فعال</span>
+                  <span className="text-[10px] text-cyan-400 bg-cyan-500/10 px-2 py-0.5 rounded-full font-medium">
+                    {stores.length} شعبه
+                  </span>
+                </div>
+
+                <div className="max-h-60 overflow-y-auto space-y-1 py-1">
+                  {stores.map((s) => {
+                    const isSelected = s.id === activeStore?.id;
+                    return (
+                      <button
+                        key={s.id}
+                        type="button"
+                        onClick={() => {
+                          switchStore(s.id);
+                          setShowStoreDropdown(false);
+                        }}
+                        className={cn(
+                          'w-full flex items-center justify-between px-3 py-2.5 rounded-xl text-xs transition cursor-pointer text-right group',
+                          isSelected
+                            ? 'bg-gradient-to-l from-blue-600/20 to-cyan-500/10 border border-blue-500/30 text-white font-bold shadow-sm'
+                            : 'hover:bg-white/[0.05] light:hover:bg-slate-100 text-slate-300 light:text-slate-700'
+                        )}
+                      >
+                        <div className="flex items-center gap-2.5">
+                          <div
+                            className={cn(
+                              'w-8 h-8 rounded-xl flex items-center justify-center shrink-0 transition-colors',
+                              isSelected
+                                ? 'bg-gradient-to-tr from-blue-600 to-cyan-500 text-white shadow-[0_0_12px_rgba(6,182,212,0.4)]'
+                                : 'bg-white/[0.04] text-slate-400 group-hover:text-slate-200 group-hover:bg-white/[0.08]'
+                            )}
+                          >
+                            <Store className="w-4 h-4" />
+                          </div>
+                          <div className="text-right">
+                            <div className="font-semibold text-slate-100 light:text-slate-900 group-hover:text-white">
+                              {s.name}
+                            </div>
+                            <div className="text-[10px] text-slate-400 light:text-slate-500 mt-0.5">
+                              واحد ارزی: {s.currency === 'IRT' ? 'تومان' : 'ریال'}
+                            </div>
+                          </div>
+                        </div>
+                        {isSelected && (
+                          <div className="w-5 h-5 rounded-full bg-cyan-500/20 text-cyan-400 flex items-center justify-center shrink-0 border border-cyan-500/30">
+                            <Check className="w-3 h-3" />
+                          </div>
+                        )}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
           </div>
         )}
       </div>

@@ -1,6 +1,7 @@
 'use client';
 
 import React, { useState, useEffect } from 'react';
+import Link from 'next/link';
 import {
   Layers,
   CheckCircle2,
@@ -19,7 +20,8 @@ import {
   Bot,
   MessageSquare,
   Smartphone,
-  Share2
+  Share2,
+  BookOpen
 } from 'lucide-react';
 import { api } from '@/lib/api';
 
@@ -237,8 +239,18 @@ export default function FeaturesSettingsPage() {
           </div>
         </div>
 
-        {/* Current Plan Badge & Tier Switcher */}
-        <div className="flex flex-wrap items-center gap-3 bg-slate-900/90 border border-slate-800 p-2.5 rounded-2xl">
+        <div className="flex flex-wrap items-center gap-3">
+          {/* Link to Full User Guide */}
+          <Link
+            href="/settings/guide"
+            className="inline-flex items-center gap-2 bg-gradient-to-r from-cyan-500/20 to-blue-600/20 hover:from-cyan-500/30 hover:to-blue-600/30 text-cyan-300 border border-cyan-500/30 px-3.5 py-2.5 rounded-2xl text-xs font-bold transition shadow-sm"
+          >
+            <BookOpen className="w-4 h-4" />
+            <span>راهنما و آموزش جامع ماژول‌ها</span>
+          </Link>
+
+          {/* Current Plan Badge & Tier Switcher */}
+          <div className="flex flex-wrap items-center gap-3 bg-slate-900/90 border border-slate-800 p-2.5 rounded-2xl">
           <div className="text-xs text-slate-400 font-medium px-2">
             پلن فعلی:
             <span className="text-sky-400 font-bold mr-1">
@@ -264,6 +276,7 @@ export default function FeaturesSettingsPage() {
           </div>
         </div>
       </div>
+    </div>
 
       {/* Feedback Banner */}
       {feedback && (
